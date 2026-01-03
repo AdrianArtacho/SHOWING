@@ -3,11 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+
   <title>SHOWING</title>
+
   <!-- Best-effort emoji favicon (works in many browsers) -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%F0%9F%93%B1%3C/text%3E%3C/svg%3E">
 
-
+  <!-- Helps a bit on Android / some browsers -->
   <meta name="theme-color" content="#000000" />
 
   <style>
@@ -43,40 +45,36 @@
     .hint { opacity: 0.75; max-width: 42rem; line-height: 1.35; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 
+    /* Main stage */
     #stage {
       position: fixed; inset: 0;
       background: #000;
       color: #fff;
     }
 
+    /* Centered “stack” layer:
+       text + headphone emoji occupy the same centered grid cell */
     #layer {
       position: absolute; inset: 0;
       display: grid;
-      place-items: center;         /* centers content */
+      place-items: center;
       text-align: center;
       padding: 24px;
       box-sizing: border-box;
     }
 
-
     #textCue, #audioCue {
-      grid-area: 1 / 1;            /* stack in same cell */
+      grid-area: 1 / 1;
     }
-    
+
     #textCue {
       white-space: pre-wrap;
       word-break: break-word;
       line-height: 1.08;
       width: 100%;
     }
-    
-    #audioCue {
-      display: none;
-      font-size: 96px;
-      line-height: 1;
-    }
 
-    /* Cover the whole screen (may crop). */
+    /* IMAGE covers whole screen (may crop) */
     #imgCue {
       position: absolute; inset: 0;
       width: 100%;
@@ -85,7 +83,14 @@
       display: none;
     }
 
+    /* Headphones centered */
+    #audioCue {
+      display: none;
+      font-size: 96px;
+      line-height: 1;
+    }
 
+    /* Debug UI */
     #debugWrap {
       position: fixed; left: 0; right: 0; bottom: 0;
       background: rgba(0,0,0,0.65);
@@ -114,6 +119,7 @@
       opacity: 0.95;
     }
 
+    /* Safe-area handling on iOS */
     .safePad {
       padding-bottom: calc(24px + env(safe-area-inset-bottom));
       padding-top: calc(24px + env(safe-area-inset-top));
@@ -122,8 +128,9 @@
 </head>
 
 <body>
+  <!-- Welcome / unlock screen -->
   <div id="welcome" class="screen safePad">
-    <div id="welcomeTitle" style="font-size: 22px; font-weight: 650;">ActionScore Player</div>
+    <div id="welcomeTitle" style="font-size: 22px; font-weight: 650;">SHOWING</div>
     <div id="welcomeInfo" class="hint"></div>
 
     <button id="startBtn">Start</button>
@@ -136,6 +143,7 @@
     <div id="welcomeError" class="hint" style="color:#ffb3b3;"></div>
   </div>
 
+  <!-- Main stage -->
   <div id="stage" class="hidden">
     <img id="imgCue" alt="" />
     <div id="layer" class="safePad" aria-live="polite">
@@ -144,6 +152,7 @@
     </div>
   </div>
 
+  <!-- Debug UI (only visible when debug=true) -->
   <div id="debugWrap" class="hidden">
     <div id="debugBar">
       <div id="dbgLeft"></div>
@@ -162,7 +171,7 @@
     const pRaw = (u.searchParams.get("p") || "1").toLowerCase().trim();
     return {
       csv: u.searchParams.get("csv") || "",
-      pRaw,
+      pRaw, // "1".."N" or "random"/"r"
       debug: (dbg === "1" || dbg === "true" || dbg === "yes")
     };
   }
@@ -177,6 +186,7 @@
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  // Minimal CSV parser (handles quotes)
   function parseCSV(text) {
     const rows = [];
     let row = [];
@@ -213,6 +223,7 @@
   }
 
   // "<timeSpec> <ACTION=...>"
+  // timeSpec: "0:0:0+6s" or "20:34:00+23s" with optional jitter: "+3(r10)s"
   function parseCueLine(line) {
     const trimmed = (line || "").trim();
     if (!trimmed) return null;
@@ -335,7 +346,7 @@
       throw new Error("Mixed content (http audio on https page).");
     }
 
-    // WebAudio (works well with local assets + CORS-friendly hosts)
+    // WebAudio (works well with local assets)
     if (audioCtx) {
       try {
         const res = await fetch(cleanUrl, { mode: "cors" });
@@ -367,23 +378,32 @@
     clearStage();
 
     if (action.kind === "TEXT") {
+      els.audioCue.style.display = "none";
+      els.textCue.style.display = "block";
       fitTextToBox(action.text || "");
       return;
     }
 
     if (action.kind === "IMAGE") {
+      els.textCue.textContent = "";
+      els.textCue.style.display = "none";
+      els.audioCue.style.display = "none";
       els.imgCue.style.display = "block";
       els.imgCue.src = action.imageUrl || "";
       return;
     }
 
     if (action.kind === "SOUND") {
+      els.textCue.textContent = "";          // ensure no layout shove
+      els.textCue.style.display = "none";
       els.audioCue.style.display = "block";
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
 
     if (action.kind === "SOUND&IMAGE") {
+      els.textCue.textContent = "";
+      els.textCue.style.display = "none";
       els.imgCue.style.display = "block";
       els.imgCue.src = action.imageUrl || "";
       els.audioCue.style.display = "block";
@@ -392,18 +412,20 @@
     }
 
     if (action.kind === "SOUND&TEXT") {
+      els.textCue.style.display = "block";
       els.audioCue.style.display = "block";
       fitTextToBox(action.text || "");
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
 
+    els.audioCue.style.display = "none";
     fitTextToBox(`Unknown action: ${action.kind}`);
   }
 
   async function fetchSheetCSV(csvUrl) {
     const u = new URL(csvUrl);
-    u.searchParams.set("_", Date.now().toString()); // cache-bust the browser/proxies
+    u.searchParams.set("_", Date.now().toString()); // cache-bust browser/proxies
     const res = await fetch(u.toString(), { mode: "cors" });
     if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
     return await res.text();
@@ -506,7 +528,6 @@
       els.dbgLeft.textContent = `Loading CSV…`;
     }
 
-    // Initial fetch+parse to determine performers and selection
     let raw;
     try {
       raw = await fetchSheetCSV(q.csv);
@@ -537,7 +558,6 @@
       debugLog(`Selected performer p=${pSelected}`);
     }
 
-    // Build initial cues for selected performer
     let lines = pickColumnLines(rows, pSelected);
     let built = buildCuesFromLines(lines);
     let cues = built.cues;
@@ -586,10 +606,8 @@
       const startPerf = performance.now();
       debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
 
-      // Track which cue raws have fired, to avoid duplicates after refresh
       const firedRaw = new Set();
 
-      // Helper to (re)build scheduled list from current cues
       const rebuildSchedule = () => {
         const nowPerf = performance.now();
         const scheduled = cues.map((c, idx) => ({
@@ -597,7 +615,6 @@
           cue: c,
           duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
         }))
-        // Keep only cues that are still in the future and not already fired
         .filter(item => item.duePerfMs > nowPerf + 20 && !firedRaw.has(item.cue.raw))
         .sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
 
@@ -614,7 +631,6 @@
         const waitMs = Math.max(0, item.duePerfMs - performance.now());
         if (waitMs > 0) await sleep(waitMs);
 
-        // Mark fired
         firedRaw.add(item.cue.raw);
 
         if (q.debug) {
@@ -622,10 +638,8 @@
           debugLog(`FIRE: ${item.cue.raw}`);
         }
 
-        // Handle refresh command invisibly
         if (isRefreshCommand(item.cue.action)) {
           debugLog("CMD=refreshdata → fetching latest CSV…");
-
           try {
             const newRaw = await fetchSheetCSV(q.csv);
             const newRows = parseCSV(newRaw);
@@ -636,19 +650,16 @@
             errors = newBuilt.errors;
 
             debugLog(`Refresh OK: cues=${cues.length}, errors=${errors.length}`);
-            // Rebuild remaining schedule from new data, keeping Start reference and fired set.
             scheduled = rebuildSchedule();
-            i = 0; // restart scan of pending list
-            continue; // do not show anything to user
+            i = 0;
+            continue; // invisible to user
           } catch (e) {
             debugLog(`Refresh FAILED: ${e.message}`);
-            // If refresh fails, just continue with existing schedule.
             i++;
             continue;
           }
         }
 
-        // Normal action
         try {
           await showAction(item.cue.action, audioCtx, debugLog);
         } catch (e) {
@@ -658,6 +669,10 @@
         i++;
       }
 
+      // End
+      els.audioCue.style.display = "none";
+      els.imgCue.style.display = "none";
+      els.textCue.style.display = "block";
       fitTextToBox("— end —");
       debugLog("END.");
     }, { once: true });
