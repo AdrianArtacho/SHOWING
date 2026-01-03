@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>ActionScore Player</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { height: 100%; margin: 0; background: #000; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+
+    .screen {
+      position: fixed; inset: 0;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 16px;
+      padding: 24px;
+      box-sizing: border-box;
+      background: #000;
+      color: #fff;
+      text-align: center;
+    }
+
+    .hidden { display: none !important; }
+
+    button {
+      font-size: 18px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      border: 1px solid #444;
+      background: #111;
+      color: #fff;
+    }
+    button:active { transform: translateY(1px); }
+
+    .hint { opacity: 0.75; max-width: 42rem; line-height: 1.35; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    /* Main stage */
+    #stage {
+      position: fixed; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: #000;
+      color: #fff;
+      padding: 24px;
+      box-sizing: border-box;
+      text-align: center;
+    }
+    #textCue {
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.1;
+      width: 100%;
+    }
+    #imgCue {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      display: none;
+    }
+    #audioCue {
+      display: none;
+      font-size: 96px;
+      line-height: 1;
+    }
+
+    /* Small debug bar */
+    #debugBar {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      padding: 10px 12px;
+      background: rgba(0,0,0,0.55);
+      color: rgba(255,255,255,0.85);
+      font-size: 12px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      box-sizing: border-box;
+      backdrop-filter: blur(6px);
+    }
+    #debugBar a { color: rgba(255,255,255,0.85); }
+  </style>
+</head>
+
+<body>
+  <!-- Welcome / unlock screen -->
+  <div id="welcome" class="screen">
+    <div style="font-size: 22px; font-weight: 650;">ActionScore Player</div>
+    <div id="welcomeInfo" class="hint"></div>
+    <button id="startBtn">Start (unlock sound)</button>
+    <div class="hint">
+      Tip: use <span class="mono">?p=1</span>, <span class="mono">?p=2</span>, <span class="mono">?p=3</span> to choose the performer column.
+    </div>
+    <div id="welcomeError" class="hint" style="color:#ffb3b3;"></div>
+  </div>
+
+  <!-- Main stage -->
+  <div id="stage" class="hidden" aria-live="polite">
+    <div id="textCue"></div>
+    <img id="imgCue" alt="" />
+    <div id="audioCue" aria-hidden="true">🎧</div>
+  </div>
+
+  <div id="debugBar" class="hidden">
+    <div id="dbgLeft"></div>
+    <div id="dbgRight"></div>
+  </div>
+
+<script>
+(() => {
+  // ---------- Utilities ----------
+  const $ = (id) => document.getElementById(id);
+
+  function parseQuery() {
+    const u = new URL(window.location.href);
+    return {
+      csv: u.searchParams.get("csv") || "",
+      p: parseInt(u.searchParams.get("p") || "1", 10), // 1-based performer index
+      debug: (u.searchParams.get("debug") || "") === "1"
+    };
+  }
+
+  function nowLocalHMS() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  // Minimal CSV parser (handles quotes). Good enough for your “one cell per row” style.
+  function parseCSV(text) {
+    const rows = [];
+    let row = [];
+    let cell = "";
+    let inQuotes = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      const n = text[i + 1];
+
+      if (c === '"' && inQuotes && n === '"') { cell += '"'; i++; continue; }
+      if (c === '"') { inQuotes = !inQuotes; continue; }
+
+      if (!inQuotes && (c === "," || c === "\n" || c === "\r")) {
+        if (c === "\r" && n === "\n") { /* swallow */ i++; }
+        row.push(cell.trim());
+        cell = "";
+        if (c !== ",") {
+          // end of row
+          // ignore completely empty trailing line
+          if (row.some(v => v.length > 0)) rows.push(row);
+          row = [];
+        }
+        continue;
+      }
+
+      cell += c;
+    }
+
+    // last cell
+    if (cell.length || row.length) {
+      row.push(cell.trim());
+      if (row.some(v => v.length > 0)) rows.push(row);
+    }
+
+    return rows;
+  }
+
+  // ---------- Cue Parsing ----------
+  // Expected: "<timeSpec> <ACTION=...>"
+  // timeSpec examples:
+  //  "0:0:0+6s"
+  //  "20:34:00+23s"
+  // Also supports optional "(rN)" jitter on the seconds part like: "0:0:0+3(r10)s"
+  // interpreted as: base + random(0..N) seconds.
+  function parseCueLine(line) {
+    const trimmed = (line || "").trim();
+    if (!trimmed) return null;
+
+    const spaceIdx = trimmed.indexOf(" ");
+    if (spaceIdx < 0) {
+      return { raw: trimmed, error: "Missing space between timeSpec and action." };
+    }
+
+    const timeSpec = trimmed.slice(0, spaceIdx).trim();
+    const actionSpec = trimmed.slice(spaceIdx + 1).trim();
+
+    const m = timeSpec.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})\+(\d+)(?:\(r(\d+)\))?s$/);
+    if (!m) {
+      return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
+    }
+
+    const hh = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    const ss = parseInt(m[3], 10);
+    const plus = parseInt(m[4], 10);
+    const jitter = m[5] ? parseInt(m[5], 10) : 0;
+
+    const jitterAdd = jitter > 0 ? Math.floor(Math.random() * (jitter + 1)) : 0;
+
+    // action parsing
+    // Supported:
+    // TEXT=...
+    // IMAGE=...
+    // SOUND=...
+    // SOUND&IMAGE=<soundURL> <imageURL>
+    // SOUND&TEXT=<soundURL> <text...>
+    // CMD=REFRESH-data  (optional extension; handy with Google Sheets edits)
+    const actionMatch = actionSpec.match(/^([A-Z&]+)=(.*)$/);
+    if (!actionMatch) {
+      return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
+    }
+
+    const kind = actionMatch[1].trim();
+    const payload = actionMatch[2].trim();
+
+    let action = { kind, payload };
+
+    if (kind === "SOUND&IMAGE") {
+      const parts = payload.split(/\s+/);
+      if (parts.length < 2) return { raw: trimmed, error: "SOUND&IMAGE needs two URLs separated by space." };
+      action = { kind, soundUrl: parts[0], imageUrl: parts.slice(1).join(" ") };
+    } else if (kind === "SOUND&TEXT") {
+      const parts = payload.split(/\s+/);
+      if (parts.length < 2) return { raw: trimmed, error: "SOUND&TEXT needs a URL then text." };
+      action = { kind, soundUrl: parts[0], text: parts.slice(1).join(" ") };
+    } else if (kind === "SOUND") {
+      action = { kind, soundUrl: payload };
+    } else if (kind === "IMAGE") {
+      action = { kind, imageUrl: payload };
+    } else if (kind === "TEXT") {
+      action = { kind, text: payload };
+    } else if (kind === "CMD") {
+      action = { kind, command: payload };
+    }
+
+    return {
+      raw: trimmed,
+      timeSpec: { hh, mm, ss, plus, jitterAdd },
+      action
+    };
+  }
+
+  function computeDueTimeMs(timeSpec, startDate, startPerfNow) {
+    // startDate: Date at the moment Start was pressed (local clock)
+    // startPerfNow: performance.now() at that same moment
+    const { hh, mm, ss, plus, jitterAdd } = timeSpec;
+
+    const isRelative = (hh === 0 && mm === 0 && ss === 0);
+
+    if (isRelative) {
+      const deltaMs = (plus + jitterAdd) * 1000;
+      return startPerfNow + deltaMs;
+    }
+
+    // Absolute local time: schedule at today's hh:mm:ss (+plus+jitterAdd seconds).
+    // If already passed at start, schedule tomorrow.
+    const base = new Date(startDate);
+    base.setHours(hh, mm, ss, 0);
+    const due = new Date(base.getTime() + (plus + jitterAdd) * 1000);
+
+    if (due.getTime() < startDate.getTime()) {
+      due.setDate(due.getDate() + 1);
+    }
+
+    // Convert wall-clock due time to performance.now() target:
+    const msFromStart = due.getTime() - startDate.getTime();
+    return startPerfNow + msFromStart;
+  }
+
+  // ---------- Rendering ----------
+  const els = {
+    welcome: $("welcome"),
+    welcomeInfo: $("welcomeInfo"),
+    welcomeError: $("welcomeError"),
+    startBtn: $("startBtn"),
+    stage: $("stage"),
+    textCue: $("textCue"),
+    imgCue: $("imgCue"),
+    audioCue: $("audioCue"),
+    debugBar: $("debugBar"),
+    dbgLeft: $("dbgLeft"),
+    dbgRight: $("dbgRight"),
+  };
+
+  function clearStage() {
+    els.textCue.textContent = "";
+    els.textCue.style.fontSize = "24px";
+    els.imgCue.style.display = "none";
+    els.imgCue.src = "";
+    els.audioCue.style.display = "none";
+  }
+
+  function fitTextToBox(text) {
+    // Binary search font size to fit into #stage box.
+    els.textCue.textContent = text;
+
+    const boxW = els.stage.clientWidth - 48;
+    const boxH = els.stage.clientHeight - 48;
+
+    let lo = 10;
+    let hi = 240; // max font size
+    let best = lo;
+
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      els.textCue.style.fontSize = mid + "px";
+      // Force layout measurement:
+      const r = els.textCue.getBoundingClientRect();
+      const fits = (r.width <= boxW + 1) && (r.height <= boxH + 1);
+
+      if (fits) { best = mid; lo = mid + 1; }
+      else { hi = mid - 1; }
+    }
+
+    els.textCue.style.fontSize = best + "px";
+  }
+
+  async function playSound(url, unlockedAudioCtx) {
+    // For mobile reliability, keep it simple: HTMLAudioElement.
+    // (The Start button unlock gesture covers autoplay restrictions.)
+    const audio = new Audio();
+    audio.src = url;
+    audio.preload = "auto";
+    audio.crossOrigin = "anonymous";
+    try {
+      await audio.play();
+    } catch (e) {
+      // If play fails, show message but keep going.
+      console.warn("Audio play failed:", e);
+    }
+  }
+
+  async function showAction(action, audioCtx) {
+    clearStage();
+
+    if (action.kind === "TEXT") {
+      els.imgCue.style.display = "none";
+      els.audioCue.style.display = "none";
+      fitTextToBox(action.text || "");
+      return;
+    }
+
+    if (action.kind === "IMAGE") {
+      els.textCue.textContent = "";
+      els.imgCue.style.display = "block";
+      els.imgCue.src = action.imageUrl || "";
+      return;
+    }
+
+    if (action.kind === "SOUND") {
+      els.textCue.textContent = "";
+      els.audioCue.style.display = "block";
+      await playSound(action.soundUrl || "", audioCtx);
+      return;
+    }
+
+    if (action.kind === "SOUND&IMAGE") {
+      els.textCue.textContent = "";
+      els.imgCue.style.display = "block";
+      els.imgCue.src = action.imageUrl || "";
+      els.audioCue.style.display = "block";
+      await playSound(action.soundUrl || "", audioCtx);
+      return;
+    }
+
+    if (action.kind === "SOUND&TEXT") {
+      els.imgCue.style.display = "none";
+      els.audioCue.style.display = "block";
+      fitTextToBox(action.text || "");
+      await playSound(action.soundUrl || "", audioCtx);
+      return;
+    }
+
+    // Optional extension
+    if (action.kind === "CMD") {
+      fitTextToBox(`CMD: ${action.command || ""}`);
+      return;
+    }
+
+    fitTextToBox(`Unknown action: ${action.kind}`);
+  }
+
+  // ---------- Main ----------
+  async function fetchSheetCSV(csvUrl) {
+    // Cache-bust to avoid stale Google CSV in some contexts:
+    const u = new URL(csvUrl);
+    u.searchParams.set("_", Date.now().toString());
+    const res = await fetch(u.toString(), { mode: "cors" });
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+    return await res.text();
+  }
+
+  function pickColumn(rows, performerIndex1Based) {
+    const col = Math.max(1, performerIndex1Based) - 1;
+    return rows
+      .map(r => (r[col] || "").trim())
+      .filter(v => v.length > 0);
+  }
+
+  function buildSchedule(lines) {
+    const cues = [];
+    const errors = [];
+    for (const ln of lines) {
+      const cue = parseCueLine(ln);
+      if (!cue) continue;
+      if (cue.error) errors.push(cue);
+      else cues.push(cue);
+    }
+    // Sort by timeSpec interpreted later (after Start). We keep file order for equal times.
+    return { cues, errors };
+  }
+
+  async function run() {
+    const q = parseQuery();
+
+    if (!q.csv) {
+      els.welcomeInfo.innerHTML =
+        `Missing <span class="mono">?csv=...</span> URL parameter.<br><br>
+         Example:<br>
+         <span class="mono">index.html?csv=ENCODED_GOOGLE_CSV_URL&p=1</span>`;
+      els.startBtn.disabled = true;
+      return;
+    }
+
+    els.welcomeInfo.innerHTML =
+      `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
+       Performer column: <span class="mono">p=${q.p}</span><br>
+       Local time now: <span class="mono">${nowLocalHMS()}</span>`;
+
+    let raw;
+    try {
+      raw = await fetchSheetCSV(q.csv);
+    } catch (e) {
+      els.welcomeError.textContent =
+        `Could not fetch CSV (CORS / URL / published settings). Error: ${e.message}`;
+      els.startBtn.disabled = true;
+      return;
+    }
+
+    const rows = parseCSV(raw);
+    const lines = pickColumn(rows, q.p);
+    const { cues, errors } = buildSchedule(lines);
+
+    if (errors.length) {
+      // Show first few parse errors on welcome screen.
+      els.welcomeError.textContent =
+        "Some lines could not be parsed:\n" +
+        errors.slice(0, 5).map(e => `- ${e.raw}  (${e.error})`).join("\n");
+    }
+
+    // Optional debug UI
+    if (q.debug) {
+      els.debugBar.classList.remove("hidden");
+      els.dbgLeft.textContent = `Loaded ${cues.length} cues (p=${q.p})`;
+    }
+
+    // Start button: unlock audio + define "landing time"
+    els.startBtn.addEventListener("click", async () => {
+      els.welcome.classList.add("hidden");
+      els.stage.classList.remove("hidden");
+
+      // Unlock audio context (best effort).
+      let audioCtx = null;
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // A tiny silent buffer to satisfy iOS gesture unlock in some cases.
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0.00001;
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.01);
+        await audioCtx.resume();
+      } catch (e) {
+        console.warn("AudioContext not available/unlock failed:", e);
+      }
+
+      const startDate = new Date();
+      const startPerf = performance.now();
+
+      if (q.debug) {
+        els.dbgRight.textContent = `Start @ ${startDate.toLocaleTimeString()}`;
+      }
+
+      // Precompute due times (in performance.now() space)
+      const scheduled = cues.map((c, idx) => ({
+        idx,
+        cue: c,
+        duePerfMs: computeDueTimeMs(c.timeSpec, startDate, startPerf)
+      })).sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
+
+      // Main loop: wait until each cue is due.
+      for (const item of scheduled) {
+        const waitMs = Math.max(0, item.duePerfMs - performance.now());
+        if (waitMs > 0) await sleep(waitMs);
+
+        const c = item.cue;
+
+        // Optional extension: refresh command
+        if (c.action.kind === "CMD" && (c.action.command || "").toUpperCase() === "REFRESH-data") {
+          // Re-fetch and rebuild schedule from "now" onward (simple version: reload page)
+          // This is robust and keeps code simple.
+          window.location.reload();
+          return;
+        }
+
+        if (q.debug) {
+          els.dbgLeft.textContent = `Cue ${item.idx + 1}/${scheduled.length}`;
+          els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
+        }
+
+        await showAction(c.action, audioCtx);
+      }
+
+      // End state (optional)
+      fitTextToBox("— end —");
+    }, { once: true });
+  }
+
+  run();
+})();
+</script>
+</body>
+</html>
