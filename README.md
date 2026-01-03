@@ -1,4 +1,4 @@
-# SHOWING
+# 📱SHOWING
 
 *A browser-based action-score player for distributed performance*
 
