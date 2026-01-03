@@ -3,7 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>ActionScore Player</title>
+
+  <title>SHOWING</title>
+
+  <!-- Best-effort emoji favicon (works in many browsers) -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%F0%9F%93%B1%3C/text%3E%3C/svg%3E">
+
+  <!-- Helps a bit on Android / some browsers -->
+  <meta name="theme-color" content="#000000" />
+
   <style>
     :root { color-scheme: dark; }
     html, body { height: 100%; margin: 0; background: #000; }
@@ -32,6 +40,7 @@
       color: #fff;
     }
     button:active { transform: translateY(1px); }
+    button.secondary { font-size: 16px; padding: 10px 14px; opacity: 0.9; }
 
     .hint { opacity: 0.75; max-width: 42rem; line-height: 1.35; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
@@ -39,12 +48,23 @@
     /* Main stage */
     #stage {
       position: fixed; inset: 0;
-      display: flex; align-items: center; justify-content: center;
       background: #000;
       color: #fff;
+    }
+
+    /* Centered “stack” layer:
+       text + headphone emoji occupy the same centered grid cell */
+    #layer {
+      position: absolute; inset: 0;
+      display: grid;
+      place-items: center;
+      text-align: center;
       padding: 24px;
       box-sizing: border-box;
-      text-align: center;
+    }
+
+    #textCue, #audioCue {
+      grid-area: 1 / 1;
     }
 
     #textCue {
@@ -54,20 +74,23 @@
       width: 100%;
     }
 
+    /* IMAGE covers whole screen (may crop) */
     #imgCue {
-      max-width: 100%;
-      max-height: 100%;
-      object-fit: contain;
+      position: absolute; inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
       display: none;
     }
 
+    /* Headphones centered */
     #audioCue {
       display: none;
       font-size: 96px;
       line-height: 1;
     }
 
-    /* Debug bar + log */
+    /* Debug UI */
     #debugWrap {
       position: fixed; left: 0; right: 0; bottom: 0;
       background: rgba(0,0,0,0.65);
@@ -96,27 +119,37 @@
       opacity: 0.95;
     }
 
-    #debugWrap a { color: rgba(255,255,255,0.88); }
+    /* Safe-area handling on iOS */
+    .safePad {
+      padding-bottom: calc(24px + env(safe-area-inset-bottom));
+      padding-top: calc(24px + env(safe-area-inset-top));
+    }
   </style>
 </head>
 
 <body>
   <!-- Welcome / unlock screen -->
-  <div id="welcome" class="screen">
-    <div id="welcomeTitle" style="font-size: 22px; font-weight: 650;">ActionScore Player</div>
+  <div id="welcome" class="screen safePad">
+    <div id="welcomeTitle" style="font-size: 22px; font-weight: 650;">SHOWING</div>
     <div id="welcomeInfo" class="hint"></div>
+
     <button id="startBtn">Start</button>
+    <button id="fsBtn" class="secondary">Fullscreen</button>
+
     <div id="welcomeTip" class="hint">
-      Tip: use <span class="mono">?p=1</span>, <span class="mono">?p=2</span>, <span class="mono">?p=3</span> to choose the performer column.
+      Tip: <span class="mono">?p=1</span>, <span class="mono">?p=2</span>, … or <span class="mono">?p=random</span>.
+      Add <span class="mono">&debug=true</span> for diagnostics.
     </div>
     <div id="welcomeError" class="hint" style="color:#ffb3b3;"></div>
   </div>
 
   <!-- Main stage -->
-  <div id="stage" class="hidden" aria-live="polite">
-    <div id="textCue"></div>
+  <div id="stage" class="hidden">
     <img id="imgCue" alt="" />
-    <div id="audioCue" aria-hidden="true">🎧</div>
+    <div id="layer" class="safePad" aria-live="polite">
+      <div id="textCue"></div>
+      <div id="audioCue" aria-hidden="true">🎧</div>
+    </div>
   </div>
 
   <!-- Debug UI (only visible when debug=true) -->
@@ -130,15 +163,15 @@
 
 <script>
 (() => {
-  // ---------- Utilities ----------
   const $ = (id) => document.getElementById(id);
 
   function parseQuery() {
     const u = new URL(window.location.href);
     const dbg = (u.searchParams.get("debug") || "").toLowerCase();
+    const pRaw = (u.searchParams.get("p") || "1").toLowerCase().trim();
     return {
       csv: u.searchParams.get("csv") || "",
-      p: parseInt(u.searchParams.get("p") || "1", 10), // 1-based performer index
+      pRaw, // "1".."N" or "random"/"r"
       debug: (dbg === "1" || dbg === "true" || dbg === "yes")
     };
   }
@@ -153,7 +186,7 @@
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  // Minimal CSV parser (handles quotes). Good enough for “one cue per row”.
+  // Minimal CSV parser (handles quotes)
   function parseCSV(text) {
     const rows = [];
     let row = [];
@@ -168,7 +201,7 @@
       if (c === '"') { inQuotes = !inQuotes; continue; }
 
       if (!inQuotes && (c === "," || c === "\n" || c === "\r")) {
-        if (c === "\r" && n === "\n") i++; // swallow \n after \r
+        if (c === "\r" && n === "\n") i++;
         row.push(cell.trim());
         cell = "";
         if (c !== ",") {
@@ -189,28 +222,20 @@
     return rows;
   }
 
-  // ---------- Cue Parsing ----------
-  // Expected: "<timeSpec> <ACTION=...>"
-  // timeSpec examples:
-  //  "0:0:0+6s"
-  //  "20:34:00+23s"
-  // Optional jitter: "0:0:0+3(r10)s" => 3s + rand(0..10)s
+  // "<timeSpec> <ACTION=...>"
+  // timeSpec: "0:0:0+6s" or "20:34:00+23s" with optional jitter: "+3(r10)s"
   function parseCueLine(line) {
     const trimmed = (line || "").trim();
     if (!trimmed) return null;
 
     const spaceIdx = trimmed.indexOf(" ");
-    if (spaceIdx < 0) {
-      return { raw: trimmed, error: "Missing space between timeSpec and action." };
-    }
+    if (spaceIdx < 0) return { raw: trimmed, error: "Missing space between timeSpec and action." };
 
     const timeSpec = trimmed.slice(0, spaceIdx).trim();
     const actionSpec = trimmed.slice(spaceIdx + 1).trim();
 
     const m = timeSpec.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})\+(\d+)(?:\(r(\d+)\))?s$/);
-    if (!m) {
-      return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
-    }
+    if (!m) return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
 
     const hh = parseInt(m[1], 10);
     const mm = parseInt(m[2], 10);
@@ -220,11 +245,9 @@
     const jitterAdd = jitter > 0 ? Math.floor(Math.random() * (jitter + 1)) : 0;
 
     const actionMatch = actionSpec.match(/^([A-Z&]+)=(.*)$/);
-    if (!actionMatch) {
-      return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
-    }
+    if (!actionMatch) return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
 
-    const kind = actionMatch[1].trim();
+    const kind = actionMatch[1].trim().toUpperCase();
     const payload = actionMatch[2].trim();
 
     let action = { kind, payload };
@@ -255,11 +278,9 @@
     const isRelative = (hh === 0 && mm === 0 && ss === 0);
 
     if (isRelative) {
-      const deltaMs = (plus + jitterAdd) * 1000;
-      return startPerfNow + deltaMs;
+      return startPerfNow + (plus + jitterAdd) * 1000;
     }
 
-    // Absolute local time: schedule at hh:mm:ss (+ offset), today or tomorrow if passed.
     const base = new Date(startDate);
     base.setHours(hh, mm, ss, 0);
     const dueWall = new Date(base.getTime() + (plus + jitterAdd) * 1000);
@@ -268,11 +289,9 @@
       dueWall.setDate(dueWall.getDate() + 1);
     }
 
-    const msFromStart = dueWall.getTime() - startDate.getTime();
-    return startPerfNow + msFromStart;
+    return startPerfNow + (dueWall.getTime() - startDate.getTime());
   }
 
-  // ---------- Rendering ----------
   const els = {
     welcome: $("welcome"),
     welcomeTitle: $("welcomeTitle"),
@@ -280,7 +299,9 @@
     welcomeTip: $("welcomeTip"),
     welcomeError: $("welcomeError"),
     startBtn: $("startBtn"),
+    fsBtn: $("fsBtn"),
     stage: $("stage"),
+    layer: $("layer"),
     textCue: $("textCue"),
     imgCue: $("imgCue"),
     audioCue: $("audioCue"),
@@ -301,43 +322,35 @@
   function fitTextToBox(text) {
     els.textCue.textContent = text;
 
-    const boxW = els.stage.clientWidth - 48;
-    const boxH = els.stage.clientHeight - 48;
+    const boxW = els.layer.clientWidth - 48;
+    const boxH = els.layer.clientHeight - 48;
 
-    let lo = 10;
-    let hi = 240;
-    let best = lo;
-
+    let lo = 10, hi = 240, best = lo;
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2);
       els.textCue.style.fontSize = mid + "px";
       const r = els.textCue.getBoundingClientRect();
       const fits = (r.width <= boxW + 1) && (r.height <= boxH + 1);
-
       if (fits) { best = mid; lo = mid + 1; }
       else { hi = mid - 1; }
     }
-
     els.textCue.style.fontSize = best + "px";
   }
 
-  // Robust audio: WebAudio (fetch+decode) first; fallback to HTMLAudio.
   async function playSound(url, audioCtx, debugLogFn) {
     const cleanUrl = (url || "").trim();
     if (!cleanUrl) return;
 
-    // Mixed content check
     if (location.protocol === "https:" && cleanUrl.startsWith("http:")) {
       debugLogFn?.(`Audio blocked (mixed content): ${cleanUrl}`);
       throw new Error("Mixed content (http audio on https page).");
     }
 
-    // 1) WebAudio path (needs CORS-friendly host)
+    // WebAudio (works well with local assets)
     if (audioCtx) {
       try {
         const res = await fetch(cleanUrl, { mode: "cors" });
         if (!res.ok) throw new Error(`Fetch ${res.status} ${res.statusText}`);
-
         const buf = await res.arrayBuffer();
         const audioBuffer = await audioCtx.decodeAudioData(buf);
 
@@ -350,40 +363,39 @@
         return;
       } catch (e) {
         debugLogFn?.(`WebAudio failed: ${e.message}`);
-        // fall through
       }
     }
 
-    // 2) HTMLAudio fallback
-    try {
-      const a = new Audio(cleanUrl);
-      a.preload = "auto";
-      a.crossOrigin = "anonymous";
-      await a.play();
-      debugLogFn?.(`HTMLAudio OK: ${cleanUrl}`);
-    } catch (e) {
-      debugLogFn?.(`HTMLAudio failed: ${e.message}`);
-      throw e;
-    }
+    // HTMLAudio fallback
+    const a = new Audio(cleanUrl);
+    a.preload = "auto";
+    a.crossOrigin = "anonymous";
+    await a.play();
+    debugLogFn?.(`HTMLAudio OK: ${cleanUrl}`);
   }
 
   async function showAction(action, audioCtx, debugLog) {
     clearStage();
 
     if (action.kind === "TEXT") {
+      els.audioCue.style.display = "none";
+      els.textCue.style.display = "block";
       fitTextToBox(action.text || "");
       return;
     }
 
     if (action.kind === "IMAGE") {
       els.textCue.textContent = "";
+      els.textCue.style.display = "none";
+      els.audioCue.style.display = "none";
       els.imgCue.style.display = "block";
       els.imgCue.src = action.imageUrl || "";
       return;
     }
 
     if (action.kind === "SOUND") {
-      els.textCue.textContent = "";
+      els.textCue.textContent = "";          // ensure no layout shove
+      els.textCue.style.display = "none";
       els.audioCue.style.display = "block";
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
@@ -391,6 +403,7 @@
 
     if (action.kind === "SOUND&IMAGE") {
       els.textCue.textContent = "";
+      els.textCue.style.display = "none";
       els.imgCue.style.display = "block";
       els.imgCue.src = action.imageUrl || "";
       els.audioCue.style.display = "block";
@@ -399,37 +412,47 @@
     }
 
     if (action.kind === "SOUND&TEXT") {
+      els.textCue.style.display = "block";
       els.audioCue.style.display = "block";
       fitTextToBox(action.text || "");
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
 
-    if (action.kind === "CMD") {
-      fitTextToBox(`CMD: ${action.command || ""}`);
-      return;
-    }
-
+    els.audioCue.style.display = "none";
     fitTextToBox(`Unknown action: ${action.kind}`);
   }
 
-  // ---------- CSV Fetch ----------
   async function fetchSheetCSV(csvUrl) {
     const u = new URL(csvUrl);
-    u.searchParams.set("_", Date.now().toString()); // cache bust
+    u.searchParams.set("_", Date.now().toString()); // cache-bust browser/proxies
     const res = await fetch(u.toString(), { mode: "cors" });
     if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
     return await res.text();
   }
 
-  function pickColumn(rows, performerIndex1Based) {
-    const col = Math.max(1, performerIndex1Based) - 1;
-    return rows
-      .map(r => (r[col] || "").trim())
-      .filter(v => v.length > 0);
+  function detectPerformerCount(rows) {
+    let maxCols = 0;
+    for (const r of rows) maxCols = Math.max(maxCols, r.length);
+
+    const available = [];
+    for (let c = 0; c < maxCols; c++) {
+      let hasAny = false;
+      for (let i = 0; i < rows.length; i++) {
+        const v = (rows[i][c] || "").trim();
+        if (v.length > 0) { hasAny = true; break; }
+      }
+      if (hasAny) available.push(c + 1);
+    }
+    return available;
   }
 
-  function buildSchedule(lines) {
+  function pickColumnLines(rows, performerIndex1Based) {
+    const col = Math.max(1, performerIndex1Based) - 1;
+    return rows.map(r => (r[col] || "").trim()).filter(v => v.length > 0);
+  }
+
+  function buildCuesFromLines(lines) {
     const cues = [];
     const errors = [];
     for (const ln of lines) {
@@ -441,11 +464,23 @@
     return { cues, errors };
   }
 
-  // ---------- Main ----------
+  function isRefreshCommand(action) {
+    if (!action || action.kind !== "CMD") return false;
+    const cmd = String(action.command || "").trim().toLowerCase();
+    return (cmd === "refreshdata" || cmd === "refresh" || cmd === "refresh-data");
+  }
+
+  async function requestFullscreen() {
+    const el = document.documentElement;
+    try {
+      if (el.requestFullscreen) await el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+    } catch (_) {}
+  }
+
   async function run() {
     const q = parseQuery();
 
-    // Default: super-clean welcome (only the button)
     if (!q.debug) {
       els.welcomeTitle.classList.add("hidden");
       els.welcomeInfo.classList.add("hidden");
@@ -465,6 +500,11 @@
       els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
     };
 
+    els.fsBtn.addEventListener("click", async () => {
+      await requestFullscreen();
+      debugLog("Requested fullscreen.");
+    });
+
     if (!q.csv) {
       els.startBtn.disabled = true;
       if (q.debug) {
@@ -472,10 +512,7 @@
         els.welcomeInfo.classList.remove("hidden");
         els.welcomeTip.classList.remove("hidden");
         els.welcomeError.classList.remove("hidden");
-        els.welcomeInfo.innerHTML =
-          `Missing <span class="mono">?csv=...</span> URL parameter.<br><br>
-           Example:<br>
-           <span class="mono">index.html?csv=ENCODED_GOOGLE_CSV_URL&p=1&debug=true</span>`;
+        els.welcomeInfo.innerHTML = `Missing <span class="mono">?csv=...</span> URL parameter.`;
       }
       return;
     }
@@ -487,7 +524,7 @@
       els.welcomeError.classList.remove("hidden");
       els.welcomeInfo.innerHTML =
         `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
-         Performer: <span class="mono">p=${q.p}</span>`;
+         p: <span class="mono">${q.pRaw}</span>`;
       els.dbgLeft.textContent = `Loading CSV…`;
     }
 
@@ -498,22 +535,41 @@
     } catch (e) {
       els.startBtn.disabled = true;
       debugLog(`CSV fetch failed: ${e.message}`);
-      if (q.debug) {
-        els.welcomeError.textContent = `Could not fetch CSV. Error: ${e.message}`;
-      }
+      if (q.debug) els.welcomeError.textContent = `Could not fetch CSV. Error: ${e.message}`;
       return;
     }
 
     const rows = parseCSV(raw);
-    const lines = pickColumn(rows, q.p);
-    const { cues, errors } = buildSchedule(lines);
+    const availablePerformers = detectPerformerCount(rows);
+    if (availablePerformers.length === 0) {
+      els.startBtn.disabled = true;
+      debugLog("No performer columns with any data.");
+      if (q.debug) els.welcomeError.textContent = "No performer columns with any data.";
+      return;
+    }
+
+    let pSelected;
+    if (q.pRaw === "random" || q.pRaw === "r") {
+      pSelected = availablePerformers[Math.floor(Math.random() * availablePerformers.length)];
+      debugLog(`p=random → selected performer p=${pSelected} from [${availablePerformers.join(", ")}]`);
+    } else {
+      const pNum = parseInt(q.pRaw, 10);
+      pSelected = Number.isFinite(pNum) && pNum > 0 ? pNum : 1;
+      debugLog(`Selected performer p=${pSelected}`);
+    }
+
+    let lines = pickColumnLines(rows, pSelected);
+    let built = buildCuesFromLines(lines);
+    let cues = built.cues;
+    let errors = built.errors;
 
     debugLog(`Rows parsed: ${rows.length}`);
-    debugLog(`Lines in column p=${q.p}: ${lines.length}`);
+    debugLog(`Available performers: [${availablePerformers.join(", ")}]`);
+    debugLog(`Lines in column p=${pSelected}: ${lines.length}`);
     debugLog(`Cues OK: ${cues.length}, errors: ${errors.length}`);
 
     if (q.debug) {
-      els.dbgLeft.textContent = `Loaded ${cues.length} cues (p=${q.p})`;
+      els.dbgLeft.textContent = `Loaded ${cues.length} cues (p=${pSelected})`;
       if (errors.length) {
         els.welcomeError.textContent =
           "Some lines could not be parsed:\n" +
@@ -521,15 +577,16 @@
       } else {
         els.welcomeError.textContent = "";
       }
-      // Show first few cues
       cues.slice(0, 10).forEach((c, i) => debugLog(`Cue[${i}]: ${c.raw}`));
     }
 
     els.startBtn.addEventListener("click", async () => {
+      await requestFullscreen();
+
       els.welcome.classList.add("hidden");
       els.stage.classList.remove("hidden");
 
-      // Unlock AudioContext on gesture (best effort)
+      // Unlock audio
       let audioCtx = null;
       try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -549,30 +606,73 @@
       const startPerf = performance.now();
       debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
 
-      // Build due times (performance.now space) and sort
-      const scheduled = cues.map((c, idx) => ({
-        idx,
-        cue: c,
-        duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
-      })).sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
+      const firedRaw = new Set();
 
-      debugLog(`Scheduled cues: ${scheduled.length}`);
+      const rebuildSchedule = () => {
+        const nowPerf = performance.now();
+        const scheduled = cues.map((c, idx) => ({
+          idx,
+          cue: c,
+          duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
+        }))
+        .filter(item => item.duePerfMs > nowPerf + 20 && !firedRaw.has(item.cue.raw))
+        .sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
 
-      for (const item of scheduled) {
+        debugLog(`Rebuilt schedule: ${scheduled.length} pending cues.`);
+        return scheduled;
+      };
+
+      let scheduled = rebuildSchedule();
+      let i = 0;
+
+      while (i < scheduled.length) {
+        const item = scheduled[i];
+
         const waitMs = Math.max(0, item.duePerfMs - performance.now());
         if (waitMs > 0) await sleep(waitMs);
 
-        els.dbgLeft.textContent = `Cue ${item.idx + 1}/${scheduled.length}`;
-        debugLog(`FIRE: ${item.cue.raw}`);
+        firedRaw.add(item.cue.raw);
+
+        if (q.debug) {
+          els.dbgLeft.textContent = `Cue ${i + 1}/${scheduled.length} (p=${pSelected})`;
+          debugLog(`FIRE: ${item.cue.raw}`);
+        }
+
+        if (isRefreshCommand(item.cue.action)) {
+          debugLog("CMD=refreshdata → fetching latest CSV…");
+          try {
+            const newRaw = await fetchSheetCSV(q.csv);
+            const newRows = parseCSV(newRaw);
+            const newLines = pickColumnLines(newRows, pSelected);
+            const newBuilt = buildCuesFromLines(newLines);
+
+            cues = newBuilt.cues;
+            errors = newBuilt.errors;
+
+            debugLog(`Refresh OK: cues=${cues.length}, errors=${errors.length}`);
+            scheduled = rebuildSchedule();
+            i = 0;
+            continue; // invisible to user
+          } catch (e) {
+            debugLog(`Refresh FAILED: ${e.message}`);
+            i++;
+            continue;
+          }
+        }
 
         try {
           await showAction(item.cue.action, audioCtx, debugLog);
         } catch (e) {
-          // In debug, show error; otherwise silently continue.
           debugLog(`Action failed: ${e.message}`);
         }
+
+        i++;
       }
 
+      // End
+      els.audioCue.style.display = "none";
+      els.imgCue.style.display = "none";
+      els.textCue.style.display = "block";
       fitTextToBox("— end —");
       debugLog("END.");
     }, { once: true });
