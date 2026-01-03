@@ -113,10 +113,11 @@
 
   function parseQuery() {
     const u = new URL(window.location.href);
+    const dbg = (u.searchParams.get("debug") || "").toLowerCase();
     return {
       csv: u.searchParams.get("csv") || "",
-      p: parseInt(u.searchParams.get("p") || "1", 10), // 1-based performer index
-      debug: (u.searchParams.get("debug") || "") === "1"
+      p: parseInt(u.searchParams.get("p") || "1", 10),
+      debug: (dbg === "1" || dbg === "true" || dbg === "yes")
     };
   }
 
