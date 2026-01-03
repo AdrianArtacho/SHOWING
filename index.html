@@ -3,7 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>ActionScore Player</title>
+  <title>SHOWING</title>
+  <!-- Best-effort emoji favicon (works in many browsers) -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%F0%9F%93%B1%3C/text%3E%3C/svg%3E">
+
 
   <meta name="theme-color" content="#000000" />
 
@@ -48,19 +51,29 @@
 
     #layer {
       position: absolute; inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+      display: grid;
+      place-items: center;         /* centers content */
       text-align: center;
       padding: 24px;
       box-sizing: border-box;
     }
 
+
+    #textCue, #audioCue {
+      grid-area: 1 / 1;            /* stack in same cell */
+    }
+    
     #textCue {
       white-space: pre-wrap;
       word-break: break-word;
       line-height: 1.08;
       width: 100%;
+    }
+    
+    #audioCue {
+      display: none;
+      font-size: 96px;
+      line-height: 1;
     }
 
     /* Cover the whole screen (may crop). */
@@ -72,11 +85,6 @@
       display: none;
     }
 
-    #audioCue {
-      display: none;
-      font-size: 96px;
-      line-height: 1;
-    }
 
     #debugWrap {
       position: fixed; left: 0; right: 0; bottom: 0;
