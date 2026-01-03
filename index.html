@@ -24,9 +24,9 @@
     .hidden { display: none !important; }
 
     button {
-      font-size: 18px;
-      padding: 12px 16px;
-      border-radius: 12px;
+      font-size: 20px;
+      padding: 14px 18px;
+      border-radius: 14px;
       border: 1px solid #444;
       background: #111;
       color: #fff;
@@ -46,49 +46,67 @@
       box-sizing: border-box;
       text-align: center;
     }
+
     #textCue {
       white-space: pre-wrap;
       word-break: break-word;
-      line-height: 1.1;
+      line-height: 1.08;
       width: 100%;
     }
+
     #imgCue {
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
       display: none;
     }
+
     #audioCue {
       display: none;
       font-size: 96px;
       line-height: 1;
     }
 
-    /* Small debug bar */
-    #debugBar {
+    /* Debug bar + log */
+    #debugWrap {
       position: fixed; left: 0; right: 0; bottom: 0;
-      padding: 10px 12px;
-      background: rgba(0,0,0,0.55);
-      color: rgba(255,255,255,0.85);
+      background: rgba(0,0,0,0.65);
+      color: rgba(255,255,255,0.88);
       font-size: 12px;
+      box-sizing: border-box;
+      backdrop-filter: blur(6px);
+      border-top: 1px solid rgba(255,255,255,0.12);
+    }
+
+    #debugBar {
       display: flex;
       gap: 12px;
       align-items: center;
       justify-content: space-between;
-      box-sizing: border-box;
-      backdrop-filter: blur(6px);
+      padding: 10px 12px;
     }
-    #debugBar a { color: rgba(255,255,255,0.85); }
+
+    #debugLog {
+      max-height: 34vh;
+      overflow: auto;
+      padding: 0 12px 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      white-space: pre-wrap;
+      line-height: 1.25;
+      opacity: 0.95;
+    }
+
+    #debugWrap a { color: rgba(255,255,255,0.88); }
   </style>
 </head>
 
 <body>
   <!-- Welcome / unlock screen -->
   <div id="welcome" class="screen">
-    <div style="font-size: 22px; font-weight: 650;">ActionScore Player</div>
+    <div id="welcomeTitle" style="font-size: 22px; font-weight: 650;">ActionScore Player</div>
     <div id="welcomeInfo" class="hint"></div>
-    <button id="startBtn">Start (unlock sound)</button>
-    <div class="hint">
+    <button id="startBtn">Start</button>
+    <div id="welcomeTip" class="hint">
       Tip: use <span class="mono">?p=1</span>, <span class="mono">?p=2</span>, <span class="mono">?p=3</span> to choose the performer column.
     </div>
     <div id="welcomeError" class="hint" style="color:#ffb3b3;"></div>
@@ -101,9 +119,13 @@
     <div id="audioCue" aria-hidden="true">🎧</div>
   </div>
 
-  <div id="debugBar" class="hidden">
-    <div id="dbgLeft"></div>
-    <div id="dbgRight"></div>
+  <!-- Debug UI (only visible when debug=true) -->
+  <div id="debugWrap" class="hidden">
+    <div id="debugBar">
+      <div id="dbgLeft"></div>
+      <div id="dbgRight"></div>
+    </div>
+    <div id="debugLog"></div>
   </div>
 
 <script>
@@ -116,7 +138,7 @@
     const dbg = (u.searchParams.get("debug") || "").toLowerCase();
     return {
       csv: u.searchParams.get("csv") || "",
-      p: parseInt(u.searchParams.get("p") || "1", 10),
+      p: parseInt(u.searchParams.get("p") || "1", 10), // 1-based performer index
       debug: (dbg === "1" || dbg === "true" || dbg === "yes")
     };
   }
@@ -131,7 +153,7 @@
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  // Minimal CSV parser (handles quotes). Good enough for your “one cell per row” style.
+  // Minimal CSV parser (handles quotes). Good enough for “one cue per row”.
   function parseCSV(text) {
     const rows = [];
     let row = [];
@@ -146,12 +168,10 @@
       if (c === '"') { inQuotes = !inQuotes; continue; }
 
       if (!inQuotes && (c === "," || c === "\n" || c === "\r")) {
-        if (c === "\r" && n === "\n") { /* swallow */ i++; }
+        if (c === "\r" && n === "\n") i++; // swallow \n after \r
         row.push(cell.trim());
         cell = "";
         if (c !== ",") {
-          // end of row
-          // ignore completely empty trailing line
           if (row.some(v => v.length > 0)) rows.push(row);
           row = [];
         }
@@ -161,7 +181,6 @@
       cell += c;
     }
 
-    // last cell
     if (cell.length || row.length) {
       row.push(cell.trim());
       if (row.some(v => v.length > 0)) rows.push(row);
@@ -175,8 +194,7 @@
   // timeSpec examples:
   //  "0:0:0+6s"
   //  "20:34:00+23s"
-  // Also supports optional "(rN)" jitter on the seconds part like: "0:0:0+3(r10)s"
-  // interpreted as: base + random(0..N) seconds.
+  // Optional jitter: "0:0:0+3(r10)s" => 3s + rand(0..10)s
   function parseCueLine(line) {
     const trimmed = (line || "").trim();
     if (!trimmed) return null;
@@ -199,17 +217,8 @@
     const ss = parseInt(m[3], 10);
     const plus = parseInt(m[4], 10);
     const jitter = m[5] ? parseInt(m[5], 10) : 0;
-
     const jitterAdd = jitter > 0 ? Math.floor(Math.random() * (jitter + 1)) : 0;
 
-    // action parsing
-    // Supported:
-    // TEXT=...
-    // IMAGE=...
-    // SOUND=...
-    // SOUND&IMAGE=<soundURL> <imageURL>
-    // SOUND&TEXT=<soundURL> <text...>
-    // CMD=REFRESH-data  (optional extension; handy with Google Sheets edits)
     const actionMatch = actionSpec.match(/^([A-Z&]+)=(.*)$/);
     if (!actionMatch) {
       return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
@@ -238,18 +247,11 @@
       action = { kind, command: payload };
     }
 
-    return {
-      raw: trimmed,
-      timeSpec: { hh, mm, ss, plus, jitterAdd },
-      action
-    };
+    return { raw: trimmed, timeSpec: { hh, mm, ss, plus, jitterAdd }, action };
   }
 
-  function computeDueTimeMs(timeSpec, startDate, startPerfNow) {
-    // startDate: Date at the moment Start was pressed (local clock)
-    // startPerfNow: performance.now() at that same moment
+  function computeDuePerfMs(timeSpec, startDate, startPerfNow) {
     const { hh, mm, ss, plus, jitterAdd } = timeSpec;
-
     const isRelative = (hh === 0 && mm === 0 && ss === 0);
 
     if (isRelative) {
@@ -257,34 +259,35 @@
       return startPerfNow + deltaMs;
     }
 
-    // Absolute local time: schedule at today's hh:mm:ss (+plus+jitterAdd seconds).
-    // If already passed at start, schedule tomorrow.
+    // Absolute local time: schedule at hh:mm:ss (+ offset), today or tomorrow if passed.
     const base = new Date(startDate);
     base.setHours(hh, mm, ss, 0);
-    const due = new Date(base.getTime() + (plus + jitterAdd) * 1000);
+    const dueWall = new Date(base.getTime() + (plus + jitterAdd) * 1000);
 
-    if (due.getTime() < startDate.getTime()) {
-      due.setDate(due.getDate() + 1);
+    if (dueWall.getTime() < startDate.getTime()) {
+      dueWall.setDate(dueWall.getDate() + 1);
     }
 
-    // Convert wall-clock due time to performance.now() target:
-    const msFromStart = due.getTime() - startDate.getTime();
+    const msFromStart = dueWall.getTime() - startDate.getTime();
     return startPerfNow + msFromStart;
   }
 
   // ---------- Rendering ----------
   const els = {
     welcome: $("welcome"),
+    welcomeTitle: $("welcomeTitle"),
     welcomeInfo: $("welcomeInfo"),
+    welcomeTip: $("welcomeTip"),
     welcomeError: $("welcomeError"),
     startBtn: $("startBtn"),
     stage: $("stage"),
     textCue: $("textCue"),
     imgCue: $("imgCue"),
     audioCue: $("audioCue"),
-    debugBar: $("debugBar"),
+    debugWrap: $("debugWrap"),
     dbgLeft: $("dbgLeft"),
     dbgRight: $("dbgRight"),
+    debugLog: $("debugLog"),
   };
 
   function clearStage() {
@@ -296,20 +299,18 @@
   }
 
   function fitTextToBox(text) {
-    // Binary search font size to fit into #stage box.
     els.textCue.textContent = text;
 
     const boxW = els.stage.clientWidth - 48;
     const boxH = els.stage.clientHeight - 48;
 
     let lo = 10;
-    let hi = 240; // max font size
+    let hi = 240;
     let best = lo;
 
     while (lo <= hi) {
       const mid = Math.floor((lo + hi) / 2);
       els.textCue.style.fontSize = mid + "px";
-      // Force layout measurement:
       const r = els.textCue.getBoundingClientRect();
       const fits = (r.width <= boxW + 1) && (r.height <= boxH + 1);
 
@@ -320,27 +321,56 @@
     els.textCue.style.fontSize = best + "px";
   }
 
-  async function playSound(url, unlockedAudioCtx) {
-    // For mobile reliability, keep it simple: HTMLAudioElement.
-    // (The Start button unlock gesture covers autoplay restrictions.)
-    const audio = new Audio();
-    audio.src = url;
-    audio.preload = "auto";
-    audio.crossOrigin = "anonymous";
+  // Robust audio: WebAudio (fetch+decode) first; fallback to HTMLAudio.
+  async function playSound(url, audioCtx, debugLogFn) {
+    const cleanUrl = (url || "").trim();
+    if (!cleanUrl) return;
+
+    // Mixed content check
+    if (location.protocol === "https:" && cleanUrl.startsWith("http:")) {
+      debugLogFn?.(`Audio blocked (mixed content): ${cleanUrl}`);
+      throw new Error("Mixed content (http audio on https page).");
+    }
+
+    // 1) WebAudio path (needs CORS-friendly host)
+    if (audioCtx) {
+      try {
+        const res = await fetch(cleanUrl, { mode: "cors" });
+        if (!res.ok) throw new Error(`Fetch ${res.status} ${res.statusText}`);
+
+        const buf = await res.arrayBuffer();
+        const audioBuffer = await audioCtx.decodeAudioData(buf);
+
+        const src = audioCtx.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(audioCtx.destination);
+        src.start();
+
+        debugLogFn?.(`WebAudio OK: ${cleanUrl}`);
+        return;
+      } catch (e) {
+        debugLogFn?.(`WebAudio failed: ${e.message}`);
+        // fall through
+      }
+    }
+
+    // 2) HTMLAudio fallback
     try {
-      await audio.play();
+      const a = new Audio(cleanUrl);
+      a.preload = "auto";
+      a.crossOrigin = "anonymous";
+      await a.play();
+      debugLogFn?.(`HTMLAudio OK: ${cleanUrl}`);
     } catch (e) {
-      // If play fails, show message but keep going.
-      console.warn("Audio play failed:", e);
+      debugLogFn?.(`HTMLAudio failed: ${e.message}`);
+      throw e;
     }
   }
 
-  async function showAction(action, audioCtx) {
+  async function showAction(action, audioCtx, debugLog) {
     clearStage();
 
     if (action.kind === "TEXT") {
-      els.imgCue.style.display = "none";
-      els.audioCue.style.display = "none";
       fitTextToBox(action.text || "");
       return;
     }
@@ -355,7 +385,7 @@
     if (action.kind === "SOUND") {
       els.textCue.textContent = "";
       els.audioCue.style.display = "block";
-      await playSound(action.soundUrl || "", audioCtx);
+      await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
 
@@ -364,19 +394,17 @@
       els.imgCue.style.display = "block";
       els.imgCue.src = action.imageUrl || "";
       els.audioCue.style.display = "block";
-      await playSound(action.soundUrl || "", audioCtx);
+      await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
 
     if (action.kind === "SOUND&TEXT") {
-      els.imgCue.style.display = "none";
       els.audioCue.style.display = "block";
       fitTextToBox(action.text || "");
-      await playSound(action.soundUrl || "", audioCtx);
+      await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
 
-    // Optional extension
     if (action.kind === "CMD") {
       fitTextToBox(`CMD: ${action.command || ""}`);
       return;
@@ -385,11 +413,10 @@
     fitTextToBox(`Unknown action: ${action.kind}`);
   }
 
-  // ---------- Main ----------
+  // ---------- CSV Fetch ----------
   async function fetchSheetCSV(csvUrl) {
-    // Cache-bust to avoid stale Google CSV in some contexts:
     const u = new URL(csvUrl);
-    u.searchParams.set("_", Date.now().toString());
+    u.searchParams.set("_", Date.now().toString()); // cache bust
     const res = await fetch(u.toString(), { mode: "cors" });
     if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
     return await res.text();
@@ -411,34 +438,69 @@
       if (cue.error) errors.push(cue);
       else cues.push(cue);
     }
-    // Sort by timeSpec interpreted later (after Start). We keep file order for equal times.
     return { cues, errors };
   }
 
+  // ---------- Main ----------
   async function run() {
     const q = parseQuery();
 
+    // Default: super-clean welcome (only the button)
+    if (!q.debug) {
+      els.welcomeTitle.classList.add("hidden");
+      els.welcomeInfo.classList.add("hidden");
+      els.welcomeTip.classList.add("hidden");
+      els.welcomeError.classList.add("hidden");
+      els.debugWrap.classList.add("hidden");
+    } else {
+      els.debugWrap.classList.remove("hidden");
+    }
+
+    const debugLog = (msg) => {
+      if (!q.debug) return;
+      const line = `[${nowLocalHMS()}] ${msg}`;
+      console.log(line);
+      els.debugLog.textContent += line + "\n";
+      els.debugLog.scrollTop = els.debugLog.scrollHeight;
+      els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
+    };
+
     if (!q.csv) {
-      els.welcomeInfo.innerHTML =
-        `Missing <span class="mono">?csv=...</span> URL parameter.<br><br>
-         Example:<br>
-         <span class="mono">index.html?csv=ENCODED_GOOGLE_CSV_URL&p=1</span>`;
       els.startBtn.disabled = true;
+      if (q.debug) {
+        els.welcomeTitle.classList.remove("hidden");
+        els.welcomeInfo.classList.remove("hidden");
+        els.welcomeTip.classList.remove("hidden");
+        els.welcomeError.classList.remove("hidden");
+        els.welcomeInfo.innerHTML =
+          `Missing <span class="mono">?csv=...</span> URL parameter.<br><br>
+           Example:<br>
+           <span class="mono">index.html?csv=ENCODED_GOOGLE_CSV_URL&p=1&debug=true</span>`;
+      }
       return;
     }
 
-    els.welcomeInfo.innerHTML =
-      `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
-       Performer column: <span class="mono">p=${q.p}</span><br>
-       Local time now: <span class="mono">${nowLocalHMS()}</span>`;
+    if (q.debug) {
+      els.welcomeTitle.classList.remove("hidden");
+      els.welcomeInfo.classList.remove("hidden");
+      els.welcomeTip.classList.remove("hidden");
+      els.welcomeError.classList.remove("hidden");
+      els.welcomeInfo.innerHTML =
+        `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
+         Performer: <span class="mono">p=${q.p}</span>`;
+      els.dbgLeft.textContent = `Loading CSV…`;
+    }
 
     let raw;
     try {
       raw = await fetchSheetCSV(q.csv);
+      debugLog(`CSV fetched (${raw.length} chars).`);
     } catch (e) {
-      els.welcomeError.textContent =
-        `Could not fetch CSV (CORS / URL / published settings). Error: ${e.message}`;
       els.startBtn.disabled = true;
+      debugLog(`CSV fetch failed: ${e.message}`);
+      if (q.debug) {
+        els.welcomeError.textContent = `Could not fetch CSV. Error: ${e.message}`;
+      }
       return;
     }
 
@@ -446,29 +508,31 @@
     const lines = pickColumn(rows, q.p);
     const { cues, errors } = buildSchedule(lines);
 
-    if (errors.length) {
-      // Show first few parse errors on welcome screen.
-      els.welcomeError.textContent =
-        "Some lines could not be parsed:\n" +
-        errors.slice(0, 5).map(e => `- ${e.raw}  (${e.error})`).join("\n");
-    }
+    debugLog(`Rows parsed: ${rows.length}`);
+    debugLog(`Lines in column p=${q.p}: ${lines.length}`);
+    debugLog(`Cues OK: ${cues.length}, errors: ${errors.length}`);
 
-    // Optional debug UI
     if (q.debug) {
-      els.debugBar.classList.remove("hidden");
       els.dbgLeft.textContent = `Loaded ${cues.length} cues (p=${q.p})`;
+      if (errors.length) {
+        els.welcomeError.textContent =
+          "Some lines could not be parsed:\n" +
+          errors.slice(0, 10).map(e => `- ${e.raw}  (${e.error})`).join("\n");
+      } else {
+        els.welcomeError.textContent = "";
+      }
+      // Show first few cues
+      cues.slice(0, 10).forEach((c, i) => debugLog(`Cue[${i}]: ${c.raw}`));
     }
 
-    // Start button: unlock audio + define "landing time"
     els.startBtn.addEventListener("click", async () => {
       els.welcome.classList.add("hidden");
       els.stage.classList.remove("hidden");
 
-      // Unlock audio context (best effort).
+      // Unlock AudioContext on gesture (best effort)
       let audioCtx = null;
       try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        // A tiny silent buffer to satisfy iOS gesture unlock in some cases.
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
         gain.gain.value = 0.00001;
@@ -476,49 +540,41 @@
         osc.start();
         osc.stop(audioCtx.currentTime + 0.01);
         await audioCtx.resume();
+        debugLog(`AudioContext state: ${audioCtx.state}`);
       } catch (e) {
-        console.warn("AudioContext not available/unlock failed:", e);
+        debugLog(`AudioContext unavailable/unlock failed: ${e.message}`);
       }
 
       const startDate = new Date();
       const startPerf = performance.now();
+      debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
 
-      if (q.debug) {
-        els.dbgRight.textContent = `Start @ ${startDate.toLocaleTimeString()}`;
-      }
-
-      // Precompute due times (in performance.now() space)
+      // Build due times (performance.now space) and sort
       const scheduled = cues.map((c, idx) => ({
         idx,
         cue: c,
-        duePerfMs: computeDueTimeMs(c.timeSpec, startDate, startPerf)
+        duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
       })).sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
 
-      // Main loop: wait until each cue is due.
+      debugLog(`Scheduled cues: ${scheduled.length}`);
+
       for (const item of scheduled) {
         const waitMs = Math.max(0, item.duePerfMs - performance.now());
         if (waitMs > 0) await sleep(waitMs);
 
-        const c = item.cue;
+        els.dbgLeft.textContent = `Cue ${item.idx + 1}/${scheduled.length}`;
+        debugLog(`FIRE: ${item.cue.raw}`);
 
-        // Optional extension: refresh command
-        if (c.action.kind === "CMD" && (c.action.command || "").toUpperCase() === "REFRESH-data") {
-          // Re-fetch and rebuild schedule from "now" onward (simple version: reload page)
-          // This is robust and keeps code simple.
-          window.location.reload();
-          return;
+        try {
+          await showAction(item.cue.action, audioCtx, debugLog);
+        } catch (e) {
+          // In debug, show error; otherwise silently continue.
+          debugLog(`Action failed: ${e.message}`);
         }
-
-        if (q.debug) {
-          els.dbgLeft.textContent = `Cue ${item.idx + 1}/${scheduled.length}`;
-          els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
-        }
-
-        await showAction(c.action, audioCtx);
       }
 
-      // End state (optional)
       fitTextToBox("— end —");
+      debugLog("END.");
     }, { once: true });
   }
 
