@@ -39,7 +39,19 @@ That’s the app URL performers will open.
 
 ## 3. Preparing the score (Google Sheets)
 
-### 3.1 Spreadsheet structure
+### 3.1 Spreadsheet SCORE
+
+The _composing_ takes place in a shared [Google Spreadsheet](https://docs.google.com/spreadsheets/d/1ax-qEYPj7ZKxs-lyc61jOVHsFHbUBr_XQTCiB127cjQ/edit?gid=88783355#gid=88783355). There the actions and time intervals are set:
+
+![score](img/score.png)
+
+The actions refered there, are described in another sheet ('Aktionen')
+
+![actions](img/actions.png)
+
+### 3.2 Spreadsheet structure
+
+From there, a csv ([*_showing*](https://docs.google.com/spreadsheets/d/1ax-qEYPj7ZKxs-lyc61jOVHsFHbUBr_XQTCiB127cjQ/edit?gid=584592538#gid=584592538)) is parsed, with the following structure:
 
 * **No header row required**
 * Each column is one performer (A = performer 1, B = performer 2, etc.)
@@ -55,7 +67,7 @@ Example:
 
 ---
 
-### 3.2 Publishing the sheet as CSV (important)
+### 3.3 Publishing the sheet as CSV (important)
 
 In Google Sheets:
 
