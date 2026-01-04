@@ -221,6 +221,24 @@ SOUND=assets/audio/sound.mp3
 
 ---
 
+Absolutely! Here’s a concise paragraph you can add to your README to explain the voting behavior:
+
+---
+
+#### Voting Actions (`VOTE`)
+
+You can introduce interactive voting into your SHOWING app by using the `VOTE` action type. A `VOTE` line in the CSV lets you display multiple options as buttons. Each button can trigger a specific follow-up action (like showing text, an image, or playing a sound) once clicked, and also sends a vote to a Google Sheet via a Google Apps Script Web App.
+
+**Example:**
+
+```
+20:50:0+0s VOTE=[Option A](TEXT=Thank you) [Option B](IMAGE=assets/image/cap.gif) [Option C](SOUND&TEXT=assets/audio/wow.mp3 Tam tam TAAAAM!)
+```
+
+When the user selects an option, the chosen action is performed and the vote is recorded in the linked Google Sheet. Just provide the `&vote=` URL parameter with the URL of your Apps Script Web App, and optionally `&show=` to tag the session. This turns your performance into an interactive experience where audience input can shape what happens next.
+
+---
+
 #### Combined actions
 
 ```
