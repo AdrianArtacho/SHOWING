@@ -99,7 +99,7 @@ The app is controlled entirely via URL parameters.
 ?csv=PASTE_THE_PUBLISHED_CSV_URL_HERE
 ```
 
-(URL-encoded)
+([URL-encoded](https://adrianartacho.github.io/UrlEncode/))
 
 ---
 
@@ -150,6 +150,7 @@ Performers normally **do not** use debug mode.
 ```
 https://yourname.github.io/showing/?csv=ENCODED_CSV_URL&p=2
 ```
+*You may use this [little online tool](https://adrianartacho.github.io/UrlEncode/) to encode the URL
 
 ---
 
