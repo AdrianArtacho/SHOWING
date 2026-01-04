@@ -3,17 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
-  <meta http-equiv="Pragma" content="no-cache">
-  <meta http-equiv="Expires" content="0">
-
 
   <title>SHOWING</title>
 
   <!-- Best-effort emoji favicon (works in many browsers) -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%F0%9F%93%B1%3C/text%3E%3C/svg%3E">
 
-  <!-- Helps a bit on Android / some browsers -->
   <meta name="theme-color" content="#000000" />
 
   <style>
@@ -44,20 +39,17 @@
       color: #fff;
     }
     button:active { transform: translateY(1px); }
-    button.secondary { font-size: 16px; padding: 10px 14px; opacity: 0.9; }
 
     .hint { opacity: 0.75; max-width: 42rem; line-height: 1.35; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 
-    /* Main stage */
     #stage {
       position: fixed; inset: 0;
       background: #000;
       color: #fff;
     }
 
-    /* Centered “stack” layer:
-       text + headphone emoji occupy the same centered grid cell */
+    /* Centered stacked layer: text + headphones share the same centered cell */
     #layer {
       position: absolute; inset: 0;
       display: grid;
@@ -78,7 +70,7 @@
       width: 100%;
     }
 
-    /* IMAGE covers whole screen (may crop) */
+    /* Full-screen image (cover) */
     #imgCue {
       position: absolute; inset: 0;
       width: 100%;
@@ -87,7 +79,6 @@
       display: none;
     }
 
-    /* Headphones centered */
     #audioCue {
       display: none;
       font-size: 96px;
@@ -123,7 +114,6 @@
       opacity: 0.95;
     }
 
-    /* Safe-area handling on iOS */
     .safePad {
       padding-bottom: calc(24px + env(safe-area-inset-bottom));
       padding-top: calc(24px + env(safe-area-inset-top));
@@ -137,8 +127,7 @@
     <div id="welcomeTitle" style="font-size: 22px; font-weight: 650;">SHOWING</div>
     <div id="welcomeInfo" class="hint"></div>
 
-    <button id="startBtn">Bist du bereit?</button>
-    <!--<button id="fsBtn" class="secondary">Fullscreen</button>-->
+    <button id="startBtn">Sind Sie bereit?</button>
 
     <div id="welcomeTip" class="hint">
       Tip: <span class="mono">?p=1</span>, <span class="mono">?p=2</span>, … or <span class="mono">?p=random</span>.
@@ -156,7 +145,7 @@
     </div>
   </div>
 
-  <!-- Debug UI (only visible when debug=true) -->
+  <!-- Debug UI -->
   <div id="debugWrap" class="hidden">
     <div id="debugBar">
       <div id="dbgLeft"></div>
@@ -190,7 +179,14 @@
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  // Minimal CSV parser (handles quotes)
+  function isIOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  }
+  function isStandaloneIOS() {
+    return window.navigator.standalone === true;
+  }
+
+  // Minimal CSV parser (handles quotes + embedded newlines)
   function parseCSV(text) {
     const rows = [];
     let row = [];
@@ -226,60 +222,40 @@
     return rows;
   }
 
-
-  // helper functions for iOS devices
-  function isIOS() {
-    return /iPad|iPhone|iPod/.test(navigator.userAgent)
-      && !window.MSStream;
-  }
-  
-  function isStandaloneIOS() {
-    // true when launched from "Add to Home Screen"
-    return window.navigator.standalone === true;
-  }
-
-  // "<timeSpec> <ACTION=...>"
-  // timeSpec: "0:0:0+6s" or "20:34:00+23s" with optional jitter: "+3(r10)s"
+  // timeSpec: "0:0:0+6s" or "20:34:00+23s"
+  // Optional repeat: "0:0:0+3(r10)s" means: repeat this action every 10s until the next cue fires (or end).
   function parseCueLine(line) {
     const trimmed = (line || "").trim();
     if (!trimmed) return null;
-  
-    // Split into "<timeSpec> <actionSpec>" using ANY whitespace (space/tab/newline)
+
+    // split "<timeSpec> <actionSpec>" using any whitespace (space/tab/newline)
     const m0 = trimmed.match(/^(\S+)\s+([\s\S]+)$/);
-    if (!m0) {
-      return { raw: trimmed, error: "Missing whitespace between timeSpec and action." };
-    }
-  
+    if (!m0) return { raw: trimmed, error: "Missing whitespace between timeSpec and action." };
+
     const timeSpec = m0[1].trim();
     const actionSpec = m0[2].trim();
-  
-    // timeSpec: "0:0:0+6s" or "20:34:00+23s" with optional jitter: "+3(r10)s"
+
+    // note: (rN) now means repeat interval seconds (not jitter)
     const m = timeSpec.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})\+(\d+)(?:\(r(\d+)\))?s$/);
-    if (!m) {
-      return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
-    }
-  
+    if (!m) return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
+
     const hh = parseInt(m[1], 10);
     const mm = parseInt(m[2], 10);
     const ss = parseInt(m[3], 10);
     const plus = parseInt(m[4], 10);
-    const jitter = m[5] ? parseInt(m[5], 10) : 0;
-    const jitterAdd = jitter > 0 ? Math.floor(Math.random() * (jitter + 1)) : 0;
-  
-    // NEWLINE-SAFE action parsing: ([\s\S]*) matches everything incl. newlines
+    const repeatEvery = m[5] ? parseInt(m[5], 10) : null;
+
+    // newline-safe action parse
     const actionMatch = actionSpec.match(/^([A-Z&]+)=([\s\S]*)$/);
-    if (!actionMatch) {
-      return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
-    }
-  
+    if (!actionMatch) return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
+
     const kind = actionMatch[1].trim().toUpperCase();
     const payload = (actionMatch[2] || "").trim();
-  
+
     let action = { kind, payload };
-  
+
     if (kind === "SOUND&IMAGE") {
-      // allow newline OR spaces between URLs
-      const parts = payload.split(/\s+/).filter(Boolean);
+      const parts = payload.split(/\s+/).filter(Boolean); // newline or spaces
       if (parts.length < 2) return { raw: trimmed, error: "SOUND&IMAGE needs soundUrl and imageUrl." };
       action = { kind, soundUrl: parts[0], imageUrl: parts.slice(1).join(" ") };
     } else if (kind === "SOUND&TEXT") {
@@ -295,22 +271,21 @@
     } else if (kind === "CMD") {
       action = { kind, command: payload };
     }
-  
-    return { raw: trimmed, timeSpec: { hh, mm, ss, plus, jitterAdd }, action };
+
+    return { raw: trimmed, timeSpec: { hh, mm, ss, plus }, repeatEvery, action };
   }
 
-
   function computeDuePerfMs(timeSpec, startDate, startPerfNow) {
-    const { hh, mm, ss, plus, jitterAdd } = timeSpec;
+    const { hh, mm, ss, plus } = timeSpec;
     const isRelative = (hh === 0 && mm === 0 && ss === 0);
 
     if (isRelative) {
-      return startPerfNow + (plus + jitterAdd) * 1000;
+      return startPerfNow + plus * 1000;
     }
 
     const base = new Date(startDate);
     base.setHours(hh, mm, ss, 0);
-    const dueWall = new Date(base.getTime() + (plus + jitterAdd) * 1000);
+    const dueWall = new Date(base.getTime() + plus * 1000);
 
     if (dueWall.getTime() < startDate.getTime()) {
       dueWall.setDate(dueWall.getDate() + 1);
@@ -326,7 +301,6 @@
     welcomeTip: $("welcomeTip"),
     welcomeError: $("welcomeError"),
     startBtn: $("startBtn"),
-    fsBtn: $("fsBtn"),
     stage: $("stage"),
     layer: $("layer"),
     textCue: $("textCue"),
@@ -340,6 +314,7 @@
 
   function clearStage() {
     els.textCue.textContent = "";
+    els.textCue.style.display = "block";
     els.textCue.style.fontSize = "24px";
     els.imgCue.style.display = "none";
     els.imgCue.src = "";
@@ -364,6 +339,12 @@
     els.textCue.style.fontSize = best + "px";
   }
 
+  function isDebugOnlyText(action) {
+    if (!action || action.kind !== "TEXT") return false;
+    const t = (action.text || "").trim();
+    return t.startsWith("VERSION=");
+  }
+
   async function playSound(url, audioCtx, debugLogFn) {
     const cleanUrl = (url || "").trim();
     if (!cleanUrl) return;
@@ -373,7 +354,7 @@
       throw new Error("Mixed content (http audio on https page).");
     }
 
-    // WebAudio (works well with local assets)
+    // WebAudio (good for local assets)
     if (audioCtx) {
       try {
         const res = await fetch(cleanUrl, { mode: "cors", cache: "no-store" });
@@ -401,11 +382,17 @@
     debugLogFn?.(`HTMLAudio OK: ${cleanUrl}`);
   }
 
-  async function showAction(action, audioCtx, debugLog) {
+  async function showAction(action, audioCtx, debugLog, q) {
     clearStage();
 
     if (action.kind === "TEXT") {
+      if (isDebugOnlyText(action) && !q.debug) {
+        // Invisible in performance mode
+        clearStage();
+        return;
+      }
       els.audioCue.style.display = "none";
+      els.imgCue.style.display = "none";
       els.textCue.style.display = "block";
       fitTextToBox(action.text || "");
       return;
@@ -423,6 +410,7 @@
     if (action.kind === "SOUND") {
       els.textCue.textContent = "";
       els.textCue.style.display = "none";
+      els.imgCue.style.display = "none";
       els.audioCue.style.display = "block";
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
@@ -439,6 +427,7 @@
     }
 
     if (action.kind === "SOUND&TEXT") {
+      els.imgCue.style.display = "none";
       els.textCue.style.display = "block";
       els.audioCue.style.display = "block";
       fitTextToBox(action.text || "");
@@ -446,31 +435,32 @@
       return;
     }
 
-    els.audioCue.style.display = "none";
-    fitTextToBox(`Unknown action: ${action.kind}`);
+    // CMD handled elsewhere
+  }
+
+  function isRefreshCommand(action) {
+    if (!action || action.kind !== "CMD") return false;
+    const cmd = String(action.command || "").trim().toLowerCase();
+    return (cmd === "refreshdata" || cmd === "refresh" || cmd === "refresh-data");
   }
 
   // Force fresh fetch: cache-buster + no-store headers
   async function fetchSheetCSV(csvUrl) {
     const u = new URL(csvUrl);
-
     const buster = (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
     u.searchParams.set("cb", buster);
 
     const res = await fetch(u.toString(), {
       mode: "cors",
       cache: "no-store",
-      headers: {
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-      },
+      headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
     });
 
     if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
     return await res.text();
   }
 
-  // Retry “refreshdata” to chase Google’s published snapshot propagation.
+  // Retry to chase Google "publish to web" propagation
   async function fetchSheetCSVWithRetries(csvUrl, debugLog, attempts = 5, delaysMs = [0, 1500, 3000, 6000, 10000]) {
     let lastText = null;
 
@@ -530,12 +520,6 @@
     return { cues, errors };
   }
 
-  function isRefreshCommand(action) {
-    if (!action || action.kind !== "CMD") return false;
-    const cmd = String(action.command || "").trim().toLowerCase();
-    return (cmd === "refreshdata" || cmd === "refresh" || cmd === "refresh-data");
-  }
-
   async function requestFullscreen() {
     const el = document.documentElement;
     try {
@@ -547,15 +531,8 @@
   async function run() {
     const q = parseQuery();
 
-    if (!q.debug) {
-      els.welcomeTitle.classList.add("hidden");
-      els.welcomeInfo.classList.add("hidden");
-      els.welcomeTip.classList.add("hidden");
-      els.welcomeError.classList.add("hidden");
-      els.debugWrap.classList.add("hidden");
-    } else {
-      els.debugWrap.classList.remove("hidden");
-    }
+    if (q.debug) els.debugWrap.classList.remove("hidden");
+    else els.debugWrap.classList.add("hidden");
 
     const debugLog = (msg) => {
       if (!q.debug) return;
@@ -566,10 +543,7 @@
       els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
     };
 
-    if (q.debug) {
-      debugLog("Tip: For true fullscreen on iOS, use 'Add to Home Screen'.");
-    }
-    // iOS fullscreen hint (shown even without debug)
+    // iOS hint (shown even without debug) when not in standalone mode
     if (isIOS() && !isStandaloneIOS()) {
       const msg = document.createElement("div");
       msg.className = "hint";
@@ -577,38 +551,26 @@
       msg.style.opacity = "0.7";
       msg.style.fontSize = "14px";
       msg.style.marginTop = "12px";
-      msg.textContent =
-        "For a fully immersive experience on iPhone/iPad, use “Add to Home Screen”.";
-    
-      // Append below the Start button
+      msg.textContent = "For a fully immersive experience on iPhone/iPad, use “Add to Home Screen”.";
       els.welcome.appendChild(msg);
     }
-
 
     if (!q.csv) {
       els.startBtn.disabled = true;
       if (q.debug) {
-        els.welcomeTitle.classList.remove("hidden");
-        els.welcomeInfo.classList.remove("hidden");
-        els.welcomeTip.classList.remove("hidden");
-        els.welcomeError.classList.remove("hidden");
         els.welcomeInfo.innerHTML = `Missing <span class="mono">?csv=...</span> URL parameter.`;
       }
       return;
     }
 
     if (q.debug) {
-      els.welcomeTitle.classList.remove("hidden");
-      els.welcomeInfo.classList.remove("hidden");
-      els.welcomeTip.classList.remove("hidden");
-      els.welcomeError.classList.remove("hidden");
       els.welcomeInfo.innerHTML =
         `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
          p: <span class="mono">${q.pRaw}</span>`;
       els.dbgLeft.textContent = `Loading CSV…`;
     }
 
-    // Initial fetch+parse
+    // Initial fetch+parse (fresh)
     let raw;
     try {
       raw = await fetchSheetCSV(q.csv);
@@ -658,7 +620,7 @@
       } else {
         els.welcomeError.textContent = "";
       }
-      cues.slice(0, 10).forEach((c, i) => debugLog(`Cue[${i}]: ${c.raw}`));
+      cues.slice(0, 12).forEach((c, i) => debugLog(`Cue[${i}]: ${c.raw}`));
     }
 
     els.startBtn.addEventListener("click", async () => {
@@ -687,28 +649,93 @@
       const startPerf = performance.now();
       debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
 
+      // Repeating action state
+      let repeatHandle = null;
+      let repeatAction = null;
+      let scheduleDirty = false;
+
+      const stopRepeat = () => {
+        if (repeatHandle !== null) {
+          clearInterval(repeatHandle);
+          repeatHandle = null;
+          repeatAction = null;
+          debugLog("Stopped repeating action.");
+        }
+      };
+
+      const startRepeat = (action, everySeconds) => {
+        stopRepeat();
+        if (!everySeconds || everySeconds <= 0) return;
+        repeatAction = action;
+        debugLog(`Repeat ON: every ${everySeconds}s until next cue.`);
+        repeatHandle = setInterval(async () => {
+          try {
+            if (repeatAction?.kind === "CMD" && isRefreshCommand(repeatAction)) {
+              // Repeat refreshdata
+              const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
+              const newRows = parseCSV(newRaw);
+              const newLines = pickColumnLines(newRows, pSelected);
+              const newBuilt = buildCuesFromLines(newLines);
+              cues = newBuilt.cues;
+              errors = newBuilt.errors;
+              scheduleDirty = true; // let the main loop re-evaluate next cues
+              debugLog(`Repeat refresh OK: cues=${cues.length}, errors=${errors.length}`);
+            } else {
+              await showAction(repeatAction, audioCtx, debugLog, q);
+            }
+          } catch (e) {
+            debugLog(`Repeat action failed: ${e.message}`);
+          }
+        }, everySeconds * 1000);
+      };
+
+      // Build schedule from cues
       const firedRaw = new Set();
 
       const rebuildSchedule = () => {
         const nowPerf = performance.now();
-        return cues.map((c, idx) => ({
+        const scheduled = cues.map((c, idx) => ({
           idx,
           cue: c,
           duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
         }))
         .filter(item => item.duePerfMs > nowPerf + 20 && !firedRaw.has(item.cue.raw))
         .sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
+        return scheduled;
+      };
+
+      // Wait function that can be interrupted by scheduleDirty
+      const waitUntil = async (targetPerfMs) => {
+        while (performance.now() < targetPerfMs) {
+          if (scheduleDirty) return false;
+          const remaining = targetPerfMs - performance.now();
+          await sleep(Math.min(200, Math.max(10, remaining)));
+        }
+        return true;
       };
 
       let scheduled = rebuildSchedule();
       debugLog(`Initial pending cues: ${scheduled.length}`);
       let i = 0;
 
-      while (i < scheduled.length) {
+      while (true) {
+        if (scheduleDirty) {
+          scheduleDirty = false;
+          scheduled = rebuildSchedule();
+          debugLog(`Schedule rebuilt (dirty). Pending cues: ${scheduled.length}`);
+          i = 0;
+          if (scheduled.length === 0) break;
+        }
+
+        if (i >= scheduled.length) break;
         const item = scheduled[i];
 
-        const waitMs = Math.max(0, item.duePerfMs - performance.now());
-        if (waitMs > 0) await sleep(waitMs);
+        // Stop any repeating action exactly when the next cue fires
+        // (we stop it right before firing the cue)
+        const ok = await waitUntil(item.duePerfMs);
+        if (!ok) continue; // scheduleDirty triggered; rebuild handled at top
+
+        stopRepeat();
 
         firedRaw.add(item.cue.raw);
 
@@ -717,40 +744,51 @@
           debugLog(`FIRE: ${item.cue.raw}`);
         }
 
-        // Refresh command: retry-fetch to chase Google publish lag
-        if (isRefreshCommand(item.cue.action)) {
-          debugLog("CMD=refreshdata → fetching latest CSV (with retries)…");
-          try {
-            const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
-            const newRows = parseCSV(newRaw);
-            const newLines = pickColumnLines(newRows, pSelected);
-            const newBuilt = buildCuesFromLines(newLines);
-
-            cues = newBuilt.cues;
-            errors = newBuilt.errors;
-
-            debugLog(`Refresh OK: cues=${cues.length}, errors=${errors.length}`);
-            scheduled = rebuildSchedule();
-            debugLog(`After refresh, pending cues: ${scheduled.length}`);
-            i = 0;
-            continue; // invisible to user
-          } catch (e) {
-            debugLog(`Refresh FAILED: ${e.message}`);
-            i++;
-            continue;
+        // Execute CMD actions (invisible)
+        if (item.cue.action.kind === "CMD") {
+          if (isRefreshCommand(item.cue.action)) {
+            debugLog("CMD=refreshdata fired.");
+            try {
+              const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
+              const newRows = parseCSV(newRaw);
+              const newLines = pickColumnLines(newRows, pSelected);
+              const newBuilt = buildCuesFromLines(newLines);
+              cues = newBuilt.cues;
+              errors = newBuilt.errors;
+              debugLog(`Refresh OK: cues=${cues.length}, errors=${errors.length}`);
+              scheduleDirty = true; // update next actions ASAP
+            } catch (e) {
+              debugLog(`Refresh FAILED: ${e.message}`);
+            }
+          } else {
+            debugLog(`CMD ignored/unknown: ${item.cue.action.command || ""}`);
           }
-        }
 
-        try {
-          await showAction(item.cue.action, audioCtx, debugLog);
-        } catch (e) {
-          debugLog(`Action failed: ${e.message}`);
+          // Apply repeat semantics to CMD too (including refreshdata)
+          if (item.cue.repeatEvery && item.cue.repeatEvery > 0) {
+            startRepeat(item.cue.action, item.cue.repeatEvery);
+          }
+        } else {
+          // Normal (visible) actions
+          try {
+            await showAction(item.cue.action, audioCtx, debugLog, q);
+          } catch (e) {
+            debugLog(`Action failed: ${e.message}`);
+          }
+
+          // Repeat visible actions until next cue
+          if (item.cue.repeatEvery && item.cue.repeatEvery > 0) {
+            startRepeat(item.cue.action, item.cue.repeatEvery);
+          }
         }
 
         i++;
       }
 
+      stopRepeat();
+
       // End
+      clearStage();
       els.audioCue.style.display = "none";
       els.imgCue.style.display = "none";
       els.textCue.style.display = "block";
