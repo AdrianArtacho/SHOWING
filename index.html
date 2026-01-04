@@ -3,10 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-
   <title>SHOWING</title>
 
-  <!-- Best-effort emoji favicon (works in many browsers) -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E%F0%9F%93%B1%3C/text%3E%3C/svg%3E">
 
   <meta name="theme-color" content="#000000" />
@@ -49,7 +47,7 @@
       color: #fff;
     }
 
-    /* Centered stacked layer: text + headphones share the same centered cell */
+    /* Centered stacked layer */
     #layer {
       position: absolute; inset: 0;
       display: grid;
@@ -59,7 +57,7 @@
       box-sizing: border-box;
     }
 
-    #textCue, #audioCue {
+    #textCue, #audioCue, #voteWrap {
       grid-area: 1 / 1;
     }
 
@@ -70,7 +68,6 @@
       width: 100%;
     }
 
-    /* Full-screen image (cover) */
     #imgCue {
       position: absolute; inset: 0;
       width: 100%;
@@ -84,6 +81,37 @@
       font-size: 96px;
       line-height: 1;
     }
+
+    /* Vote UI */
+    #voteWrap {
+      display: none;
+      width: min(920px, 100%);
+      padding: 16px;
+      box-sizing: border-box;
+    }
+
+    #voteGrid {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      align-items: stretch;
+    }
+
+    .voteBtn {
+      width: 100%;
+      font-size: 22px;
+      padding: 18px 16px;
+      border-radius: 18px;
+      border: 1px solid #555;
+      background: #0f0f0f;
+      color: #fff;
+      line-height: 1.15;
+      white-space: normal;
+      word-break: break-word;
+      min-height: 68px;
+    }
+
+    .voteBtn:active { transform: translateY(1px); }
 
     /* Debug UI */
     #debugWrap {
@@ -122,13 +150,10 @@
 </head>
 
 <body>
-  <!-- Welcome / unlock screen -->
   <div id="welcome" class="screen safePad">
     <div id="welcomeTitle" style="font-size: 22px; font-weight: 650;">SHOWING</div>
     <div id="welcomeInfo" class="hint"></div>
-
-    <button id="startBtn">Sind Sie bereit?</button>
-
+    <button id="startBtn">Start</button>
     <div id="welcomeTip" class="hint">
       Tip: <span class="mono">?p=1</span>, <span class="mono">?p=2</span>, … or <span class="mono">?p=random</span>.
       Add <span class="mono">&debug=true</span> for diagnostics.
@@ -136,16 +161,18 @@
     <div id="welcomeError" class="hint" style="color:#ffb3b3;"></div>
   </div>
 
-  <!-- Main stage -->
   <div id="stage" class="hidden">
     <img id="imgCue" alt="" />
     <div id="layer" class="safePad" aria-live="polite">
       <div id="textCue"></div>
       <div id="audioCue" aria-hidden="true">🎧</div>
+
+      <div id="voteWrap">
+        <div id="voteGrid"></div>
+      </div>
     </div>
   </div>
 
-  <!-- Debug UI -->
   <div id="debugWrap" class="hidden">
     <div id="debugBar">
       <div id="dbgLeft"></div>
@@ -164,8 +191,10 @@
     const pRaw = (u.searchParams.get("p") || "1").toLowerCase().trim();
     return {
       csv: u.searchParams.get("csv") || "",
-      pRaw, // "1".."N" or "random"/"r"
-      debug: (dbg === "1" || dbg === "true" || dbg === "yes")
+      pRaw,
+      debug: (dbg === "1" || dbg === "true" || dbg === "yes"),
+      voteUrl: u.searchParams.get("vote") || "",  // Apps Script Web App /exec
+      showId: u.searchParams.get("show") || ""    // optional label stored with votes
     };
   }
 
@@ -184,6 +213,20 @@
   }
   function isStandaloneIOS() {
     return window.navigator.standalone === true;
+  }
+
+  function getOrCreateSessionId() {
+    try {
+      const k = "showing_session_id_v1";
+      let v = localStorage.getItem(k);
+      if (!v) {
+        v = (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+        localStorage.setItem(k, v);
+      }
+      return v;
+    } catch (_) {
+      return (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+    }
   }
 
   // Minimal CSV parser (handles quotes + embedded newlines)
@@ -223,19 +266,17 @@
   }
 
   // timeSpec: "0:0:0+6s" or "20:34:00+23s"
-  // Optional repeat: "0:0:0+3(r10)s" means: repeat this action every 10s until the next cue fires (or end).
+  // Optional repeat: "0:0:0+3(r10)s" => repeat action every 10s until next cue.
   function parseCueLine(line) {
     const trimmed = (line || "").trim();
     if (!trimmed) return null;
 
-    // split "<timeSpec> <actionSpec>" using any whitespace (space/tab/newline)
     const m0 = trimmed.match(/^(\S+)\s+([\s\S]+)$/);
     if (!m0) return { raw: trimmed, error: "Missing whitespace between timeSpec and action." };
 
     const timeSpec = m0[1].trim();
     const actionSpec = m0[2].trim();
 
-    // note: (rN) now means repeat interval seconds (not jitter)
     const m = timeSpec.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})\+(\d+)(?:\(r(\d+)\))?s$/);
     if (!m) return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
 
@@ -245,7 +286,6 @@
     const plus = parseInt(m[4], 10);
     const repeatEvery = m[5] ? parseInt(m[5], 10) : null;
 
-    // newline-safe action parse
     const actionMatch = actionSpec.match(/^([A-Z&]+)=([\s\S]*)$/);
     if (!actionMatch) return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
 
@@ -255,7 +295,7 @@
     let action = { kind, payload };
 
     if (kind === "SOUND&IMAGE") {
-      const parts = payload.split(/\s+/).filter(Boolean); // newline or spaces
+      const parts = payload.split(/\s+/).filter(Boolean);
       if (parts.length < 2) return { raw: trimmed, error: "SOUND&IMAGE needs soundUrl and imageUrl." };
       action = { kind, soundUrl: parts[0], imageUrl: parts.slice(1).join(" ") };
     } else if (kind === "SOUND&TEXT") {
@@ -270,6 +310,8 @@
       action = { kind, text: payload };
     } else if (kind === "CMD") {
       action = { kind, command: payload };
+    } else if (kind === "VOTE") {
+      action = { kind, voteSpec: payload };
     }
 
     return { raw: trimmed, timeSpec: { hh, mm, ss, plus }, repeatEvery, action };
@@ -279,17 +321,13 @@
     const { hh, mm, ss, plus } = timeSpec;
     const isRelative = (hh === 0 && mm === 0 && ss === 0);
 
-    if (isRelative) {
-      return startPerfNow + plus * 1000;
-    }
+    if (isRelative) return startPerfNow + plus * 1000;
 
     const base = new Date(startDate);
     base.setHours(hh, mm, ss, 0);
     const dueWall = new Date(base.getTime() + plus * 1000);
 
-    if (dueWall.getTime() < startDate.getTime()) {
-      dueWall.setDate(dueWall.getDate() + 1);
-    }
+    if (dueWall.getTime() < startDate.getTime()) dueWall.setDate(dueWall.getDate() + 1);
 
     return startPerfNow + (dueWall.getTime() - startDate.getTime());
   }
@@ -306,6 +344,8 @@
     textCue: $("textCue"),
     imgCue: $("imgCue"),
     audioCue: $("audioCue"),
+    voteWrap: $("voteWrap"),
+    voteGrid: $("voteGrid"),
     debugWrap: $("debugWrap"),
     dbgLeft: $("dbgLeft"),
     dbgRight: $("dbgRight"),
@@ -319,6 +359,8 @@
     els.imgCue.style.display = "none";
     els.imgCue.src = "";
     els.audioCue.style.display = "none";
+    els.voteWrap.style.display = "none";
+    els.voteGrid.innerHTML = "";
   }
 
   function fitTextToBox(text) {
@@ -341,8 +383,7 @@
 
   function isDebugOnlyText(action) {
     if (!action || action.kind !== "TEXT") return false;
-    const t = (action.text || "").trim();
-    return t.startsWith("VERSION=");
+    return (action.text || "").trim().startsWith("VERSION=");
   }
 
   async function playSound(url, audioCtx, debugLogFn) {
@@ -354,19 +395,16 @@
       throw new Error("Mixed content (http audio on https page).");
     }
 
-    // WebAudio (good for local assets)
     if (audioCtx) {
       try {
         const res = await fetch(cleanUrl, { mode: "cors", cache: "no-store" });
         if (!res.ok) throw new Error(`Fetch ${res.status} ${res.statusText}`);
         const buf = await res.arrayBuffer();
         const audioBuffer = await audioCtx.decodeAudioData(buf);
-
         const src = audioCtx.createBufferSource();
         src.buffer = audioBuffer;
         src.connect(audioCtx.destination);
         src.start();
-
         debugLogFn?.(`WebAudio OK: ${cleanUrl}`);
         return;
       } catch (e) {
@@ -374,7 +412,6 @@
       }
     }
 
-    // HTMLAudio fallback
     const a = new Audio(cleanUrl);
     a.preload = "auto";
     a.crossOrigin = "anonymous";
@@ -382,42 +419,98 @@
     debugLogFn?.(`HTMLAudio OK: ${cleanUrl}`);
   }
 
+  function parseInlineAction(actionStr) {
+    const s = (actionStr || "").trim();
+    const m = s.match(/^([A-Z&]+)=([\s\S]*)$/);
+    if (!m) return null;
+
+    const kind = m[1].trim().toUpperCase();
+    const payload = (m[2] || "").trim();
+
+    if (kind === "SOUND&IMAGE") {
+      const parts = payload.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return null;
+      return { kind, soundUrl: parts[0], imageUrl: parts.slice(1).join(" ") };
+    }
+    if (kind === "SOUND&TEXT") {
+      const parts = payload.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return null;
+      return { kind, soundUrl: parts[0], text: parts.slice(1).join(" ") };
+    }
+    if (kind === "SOUND") return { kind, soundUrl: payload };
+    if (kind === "IMAGE") return { kind, imageUrl: payload };
+    if (kind === "TEXT") return { kind, text: payload };
+    if (kind === "CMD") return { kind, command: payload };
+    if (kind === "VOTE") return { kind, voteSpec: payload };
+    return { kind, payload };
+  }
+
+  // Parses: [Option A](TEXT=...) [Option B](IMAGE=...) ...
+  // Allows whitespace/newlines between parts.
+  function parseVoteSpec(spec) {
+    const s = (spec || "").trim();
+    const out = [];
+
+    let i = 0;
+    while (i < s.length) {
+      // find '['
+      const lb = s.indexOf("[", i);
+      if (lb < 0) break;
+      const rb = s.indexOf("]", lb + 1);
+      if (rb < 0) break;
+      const label = s.slice(lb + 1, rb).trim();
+
+      // next non-space should be '('
+      let j = rb + 1;
+      while (j < s.length && /\s/.test(s[j])) j++;
+      if (s[j] !== "(") { i = rb + 1; continue; }
+
+      // parse until matching ')'
+      j++; // after '('
+      let depth = 1;
+      const start = j;
+      while (j < s.length && depth > 0) {
+        if (s[j] === "(") depth++;
+        else if (s[j] === ")") depth--;
+        j++;
+      }
+      if (depth !== 0) break;
+
+      const inner = s.slice(start, j - 1).trim();
+      const action = parseInlineAction(inner);
+      if (action) out.push({ label, action });
+
+      i = j;
+    }
+
+    return out;
+  }
+
   async function showAction(action, audioCtx, debugLog, q) {
     clearStage();
 
     if (action.kind === "TEXT") {
-      if (isDebugOnlyText(action) && !q.debug) {
-        // Invisible in performance mode
-        clearStage();
-        return;
-      }
-      els.audioCue.style.display = "none";
-      els.imgCue.style.display = "none";
+      if (isDebugOnlyText(action) && !q.debug) return;
       els.textCue.style.display = "block";
       fitTextToBox(action.text || "");
       return;
     }
 
     if (action.kind === "IMAGE") {
-      els.textCue.textContent = "";
       els.textCue.style.display = "none";
-      els.audioCue.style.display = "none";
       els.imgCue.style.display = "block";
       els.imgCue.src = action.imageUrl || "";
       return;
     }
 
     if (action.kind === "SOUND") {
-      els.textCue.textContent = "";
       els.textCue.style.display = "none";
-      els.imgCue.style.display = "none";
       els.audioCue.style.display = "block";
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
 
     if (action.kind === "SOUND&IMAGE") {
-      els.textCue.textContent = "";
       els.textCue.style.display = "none";
       els.imgCue.style.display = "block";
       els.imgCue.src = action.imageUrl || "";
@@ -427,7 +520,6 @@
     }
 
     if (action.kind === "SOUND&TEXT") {
-      els.imgCue.style.display = "none";
       els.textCue.style.display = "block";
       els.audioCue.style.display = "block";
       fitTextToBox(action.text || "");
@@ -435,7 +527,7 @@
       return;
     }
 
-    // CMD handled elsewhere
+    // VOTE handled elsewhere (needs context)
   }
 
   function isRefreshCommand(action) {
@@ -444,7 +536,6 @@
     return (cmd === "refreshdata" || cmd === "refresh" || cmd === "refresh-data");
   }
 
-  // Force fresh fetch: cache-buster + no-store headers
   async function fetchSheetCSV(csvUrl) {
     const u = new URL(csvUrl);
     const buster = (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
@@ -460,29 +551,20 @@
     return await res.text();
   }
 
-  // Retry to chase Google "publish to web" propagation
   async function fetchSheetCSVWithRetries(csvUrl, debugLog, attempts = 5, delaysMs = [0, 1500, 3000, 6000, 10000]) {
     let lastText = null;
-
     for (let i = 0; i < attempts; i++) {
       const d = delaysMs[i] ?? 0;
-      if (d > 0) {
-        debugLog?.(`Refresh retry ${i + 1}/${attempts}: waiting ${d}ms…`);
-        await sleep(d);
-      } else {
-        debugLog?.(`Refresh retry ${i + 1}/${attempts}: fetching…`);
-      }
+      if (d > 0) { debugLog?.(`Refresh retry ${i + 1}/${attempts}: waiting ${d}ms…`); await sleep(d); }
+      else { debugLog?.(`Refresh retry ${i + 1}/${attempts}: fetching…`); }
 
       const text = await fetchSheetCSV(csvUrl);
-
       if (lastText !== null && text !== lastText) {
         debugLog?.(`Refresh: detected changed CSV on attempt ${i + 1}.`);
         return text;
       }
-
       lastText = text;
     }
-
     debugLog?.(`Refresh: no change detected after ${attempts} attempts; using last fetch.`);
     return lastText;
   }
@@ -528,16 +610,28 @@
     } catch (_) {}
   }
 
+  async function castVote(voteUrl, payload, debugLog) {
+    if (!voteUrl) {
+      debugLog?.("Vote URL missing (add &vote=YOUR_APPS_SCRIPT_EXEC_URL). Vote not sent.");
+      return;
+    }
+    try {
+      await fetch(voteUrl, {
+        method: "POST",
+        mode: "no-cors",                 // important: avoids CORS issues on GH Pages
+        headers: { "Content-Type": "text/plain;charset=utf-8" }, // keep it simple
+        body: JSON.stringify(payload),
+      });
+      debugLog?.("Vote sent (no-cors).");
+    } catch (e) {
+      debugLog?.(`Vote send failed: ${e.message}`);
+    }
+  }
+
   async function run() {
     const q = parseQuery();
+    const sessionId = getOrCreateSessionId();
 
-    if (!q.debug) {
-      els.welcomeTip.classList.add("hidden");
-    }
-    if (!q.debug) {
-      els.welcomeTitle.classList.add("hidden");
-    }
-    
     if (q.debug) els.debugWrap.classList.remove("hidden");
     else els.debugWrap.classList.add("hidden");
 
@@ -550,7 +644,13 @@
       els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
     };
 
-    // iOS hint (shown even without debug) when not in standalone mode
+    // Optional: hide title+tip unless debug
+    if (!q.debug) {
+      els.welcomeTitle.classList.add("hidden");
+      els.welcomeTip.classList.add("hidden");
+    }
+
+    // iOS hint even without debug (only on Safari browser, not standalone)
     if (isIOS() && !isStandaloneIOS()) {
       const msg = document.createElement("div");
       msg.className = "hint";
@@ -564,20 +664,19 @@
 
     if (!q.csv) {
       els.startBtn.disabled = true;
-      if (q.debug) {
-        els.welcomeInfo.innerHTML = `Missing <span class="mono">?csv=...</span> URL parameter.`;
-      }
+      if (q.debug) els.welcomeInfo.innerHTML = `Missing <span class="mono">?csv=...</span> URL parameter.`;
       return;
     }
 
     if (q.debug) {
       els.welcomeInfo.innerHTML =
         `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
-         p: <span class="mono">${q.pRaw}</span>`;
+         p: <span class="mono">${q.pRaw}</span><br>
+         vote: <span class="mono">${(q.voteUrl || "(none)").replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
+         show: <span class="mono">${q.showId || "(none)"}</span>`;
       els.dbgLeft.textContent = `Loading CSV…`;
     }
 
-    // Initial fetch+parse (fresh)
     let raw;
     try {
       raw = await fetchSheetCSV(q.csv);
@@ -627,12 +726,10 @@
       } else {
         els.welcomeError.textContent = "";
       }
-      cues.slice(0, 12).forEach((c, i) => debugLog(`Cue[${i}]: ${c.raw}`));
     }
 
     els.startBtn.addEventListener("click", async () => {
       await requestFullscreen();
-
       els.welcome.classList.add("hidden");
       els.stage.classList.remove("hidden");
 
@@ -656,7 +753,7 @@
       const startPerf = performance.now();
       debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
 
-      // Repeating action state
+      // repeating action state
       let repeatHandle = null;
       let repeatAction = null;
       let scheduleDirty = false;
@@ -677,16 +774,18 @@
         debugLog(`Repeat ON: every ${everySeconds}s until next cue.`);
         repeatHandle = setInterval(async () => {
           try {
+            // Repeating refreshdata keeps reading updated score
             if (repeatAction?.kind === "CMD" && isRefreshCommand(repeatAction)) {
-              // Repeat refreshdata
               const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
               const newRows = parseCSV(newRaw);
               const newLines = pickColumnLines(newRows, pSelected);
               const newBuilt = buildCuesFromLines(newLines);
               cues = newBuilt.cues;
               errors = newBuilt.errors;
-              scheduleDirty = true; // let the main loop re-evaluate next cues
+              scheduleDirty = true;
               debugLog(`Repeat refresh OK: cues=${cues.length}, errors=${errors.length}`);
+            } else if (repeatAction?.kind === "VOTE") {
+              // don't auto-repeat vote UI; ignore repeats for VOTE
             } else {
               await showAction(repeatAction, audioCtx, debugLog, q);
             }
@@ -696,22 +795,19 @@
         }, everySeconds * 1000);
       };
 
-      // Build schedule from cues
       const firedRaw = new Set();
 
       const rebuildSchedule = () => {
         const nowPerf = performance.now();
-        const scheduled = cues.map((c, idx) => ({
+        return cues.map((c, idx) => ({
           idx,
           cue: c,
           duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
         }))
         .filter(item => item.duePerfMs > nowPerf + 20 && !firedRaw.has(item.cue.raw))
         .sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
-        return scheduled;
       };
 
-      // Wait function that can be interrupted by scheduleDirty
       const waitUntil = async (targetPerfMs) => {
         while (performance.now() < targetPerfMs) {
           if (scheduleDirty) return false;
@@ -733,17 +829,13 @@
           i = 0;
           if (scheduled.length === 0) break;
         }
-
         if (i >= scheduled.length) break;
+
         const item = scheduled[i];
-
-        // Stop any repeating action exactly when the next cue fires
-        // (we stop it right before firing the cue)
         const ok = await waitUntil(item.duePerfMs);
-        if (!ok) continue; // scheduleDirty triggered; rebuild handled at top
+        if (!ok) continue;
 
-        stopRepeat();
-
+        stopRepeat(); // stop repeat exactly when next cue fires
         firedRaw.add(item.cue.raw);
 
         if (q.debug) {
@@ -751,9 +843,11 @@
           debugLog(`FIRE: ${item.cue.raw}`);
         }
 
-        // Execute CMD actions (invisible)
-        if (item.cue.action.kind === "CMD") {
-          if (isRefreshCommand(item.cue.action)) {
+        const act = item.cue.action;
+
+        // CMD
+        if (act.kind === "CMD") {
+          if (isRefreshCommand(act)) {
             debugLog("CMD=refreshdata fired.");
             try {
               const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
@@ -763,42 +857,84 @@
               cues = newBuilt.cues;
               errors = newBuilt.errors;
               debugLog(`Refresh OK: cues=${cues.length}, errors=${errors.length}`);
-              scheduleDirty = true; // update next actions ASAP
+              scheduleDirty = true;
             } catch (e) {
               debugLog(`Refresh FAILED: ${e.message}`);
             }
           } else {
-            debugLog(`CMD ignored/unknown: ${item.cue.action.command || ""}`);
+            debugLog(`CMD ignored/unknown: ${act.command || ""}`);
           }
-
-          // Apply repeat semantics to CMD too (including refreshdata)
-          if (item.cue.repeatEvery && item.cue.repeatEvery > 0) {
-            startRepeat(item.cue.action, item.cue.repeatEvery);
-          }
-        } else {
-          // Normal (visible) actions
-          try {
-            await showAction(item.cue.action, audioCtx, debugLog, q);
-          } catch (e) {
-            debugLog(`Action failed: ${e.message}`);
-          }
-
-          // Repeat visible actions until next cue
-          if (item.cue.repeatEvery && item.cue.repeatEvery > 0) {
-            startRepeat(item.cue.action, item.cue.repeatEvery);
-          }
+          if (item.cue.repeatEvery && item.cue.repeatEvery > 0) startRepeat(act, item.cue.repeatEvery);
+          i++;
+          continue;
         }
+
+        // VOTE
+        if (act.kind === "VOTE") {
+          clearStage();
+
+          const options = parseVoteSpec(act.voteSpec || "");
+          if (!options.length) {
+            if (q.debug) debugLog("VOTE parse failed: no options found.");
+            i++;
+            continue;
+          }
+
+          els.voteWrap.style.display = "block";
+          els.voteGrid.innerHTML = "";
+
+          // build buttons
+          options.forEach((opt, idx) => {
+            const b = document.createElement("button");
+            b.className = "voteBtn";
+            b.type = "button";
+            b.textContent = opt.label || `Option ${idx + 1}`;
+            b.addEventListener("click", async () => {
+              // hide vote UI immediately
+              els.voteWrap.style.display = "none";
+              els.voteGrid.innerHTML = "";
+
+              // cast vote
+              const payload = {
+                showId: q.showId,
+                sessionId,
+                performer: pSelected,
+                optionLabel: opt.label,
+                optionIndex: idx,
+                tsClientIso: new Date().toISOString(),
+                userAgent: navigator.userAgent
+              };
+              await castVote(q.voteUrl, payload, debugLog);
+
+              // execute inline action
+              try {
+                await showAction(opt.action, audioCtx, debugLog, q);
+              } catch (e) {
+                debugLog(`Vote inline action failed: ${e.message}`);
+              }
+            });
+            els.voteGrid.appendChild(b);
+          });
+
+          // NOTE: repeats are ignored for VOTE (otherwise it would pop back up)
+          i++;
+          continue;
+        }
+
+        // normal visible actions
+        try {
+          await showAction(act, audioCtx, debugLog, q);
+        } catch (e) {
+          debugLog(`Action failed: ${e.message}`);
+        }
+
+        if (item.cue.repeatEvery && item.cue.repeatEvery > 0) startRepeat(act, item.cue.repeatEvery);
 
         i++;
       }
 
       stopRepeat();
-
-      // End
       clearStage();
-      els.audioCue.style.display = "none";
-      els.imgCue.style.display = "none";
-      els.textCue.style.display = "block";
       fitTextToBox("— end —");
       debugLog("END.");
     }, { once: true });
