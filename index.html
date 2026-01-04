@@ -231,38 +231,48 @@
   function parseCueLine(line) {
     const trimmed = (line || "").trim();
     if (!trimmed) return null;
-
-    const spaceIdx = trimmed.indexOf(" ");
-    if (spaceIdx < 0) return { raw: trimmed, error: "Missing space between timeSpec and action." };
-
-    const timeSpec = trimmed.slice(0, spaceIdx).trim();
-    const actionSpec = trimmed.slice(spaceIdx + 1).trim();
-
+  
+    // Split into "<timeSpec> <actionSpec>" using ANY whitespace (space/tab/newline)
+    const m0 = trimmed.match(/^(\S+)\s+([\s\S]+)$/);
+    if (!m0) {
+      return { raw: trimmed, error: "Missing whitespace between timeSpec and action." };
+    }
+  
+    const timeSpec = m0[1].trim();
+    const actionSpec = m0[2].trim();
+  
+    // timeSpec: "0:0:0+6s" or "20:34:00+23s" with optional jitter: "+3(r10)s"
     const m = timeSpec.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})\+(\d+)(?:\(r(\d+)\))?s$/);
-    if (!m) return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
-
+    if (!m) {
+      return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
+    }
+  
     const hh = parseInt(m[1], 10);
     const mm = parseInt(m[2], 10);
     const ss = parseInt(m[3], 10);
     const plus = parseInt(m[4], 10);
     const jitter = m[5] ? parseInt(m[5], 10) : 0;
     const jitterAdd = jitter > 0 ? Math.floor(Math.random() * (jitter + 1)) : 0;
-
-    const actionMatch = actionSpec.match(/^([A-Z&]+)=(.*)$/);
-    if (!actionMatch) return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
-
+  
+    // NEWLINE-SAFE action parsing: ([\s\S]*) matches everything incl. newlines
+    const actionMatch = actionSpec.match(/^([A-Z&]+)=([\s\S]*)$/);
+    if (!actionMatch) {
+      return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
+    }
+  
     const kind = actionMatch[1].trim().toUpperCase();
-    const payload = actionMatch[2].trim();
-
+    const payload = (actionMatch[2] || "").trim();
+  
     let action = { kind, payload };
-
+  
     if (kind === "SOUND&IMAGE") {
-      const parts = payload.split(/\s+/);
-      if (parts.length < 2) return { raw: trimmed, error: "SOUND&IMAGE needs two URLs separated by space." };
+      // allow newline OR spaces between URLs
+      const parts = payload.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return { raw: trimmed, error: "SOUND&IMAGE needs soundUrl and imageUrl." };
       action = { kind, soundUrl: parts[0], imageUrl: parts.slice(1).join(" ") };
     } else if (kind === "SOUND&TEXT") {
-      const parts = payload.split(/\s+/);
-      if (parts.length < 2) return { raw: trimmed, error: "SOUND&TEXT needs a URL then text." };
+      const parts = payload.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return { raw: trimmed, error: "SOUND&TEXT needs a soundUrl then text." };
       action = { kind, soundUrl: parts[0], text: parts.slice(1).join(" ") };
     } else if (kind === "SOUND") {
       action = { kind, soundUrl: payload };
@@ -273,9 +283,10 @@
     } else if (kind === "CMD") {
       action = { kind, command: payload };
     }
-
+  
     return { raw: trimmed, timeSpec: { hh, mm, ss, plus, jitterAdd }, action };
   }
+
 
   function computeDuePerfMs(timeSpec, startDate, startPerfNow) {
     const { hh, mm, ss, plus, jitterAdd } = timeSpec;
