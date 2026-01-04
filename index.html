@@ -353,7 +353,7 @@
     // WebAudio (works well with local assets)
     if (audioCtx) {
       try {
-        const res = await fetch(cleanUrl, { mode: "cors" });
+        const res = await fetch(cleanUrl, { mode: "cors", cache: "no-store" });
         if (!res.ok) throw new Error(`Fetch ${res.status} ${res.statusText}`);
         const buf = await res.arrayBuffer();
         const audioBuffer = await audioCtx.decodeAudioData(buf);
@@ -398,7 +398,7 @@
     }
 
     if (action.kind === "SOUND") {
-      els.textCue.textContent = "";          // ensure no layout shove
+      els.textCue.textContent = "";
       els.textCue.style.display = "none";
       els.audioCue.style.display = "block";
       await playSound(action.soundUrl || "", audioCtx, debugLog);
@@ -427,12 +427,51 @@
     fitTextToBox(`Unknown action: ${action.kind}`);
   }
 
+  // Force fresh fetch: cache-buster + no-store headers
   async function fetchSheetCSV(csvUrl) {
     const u = new URL(csvUrl);
-    u.searchParams.set("_", Date.now().toString()); // cache-bust browser/proxies
-    const res = await fetch(u.toString(), { mode: "cors" });
+
+    const buster = (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+    u.searchParams.set("cb", buster);
+
+    const res = await fetch(u.toString(), {
+      mode: "cors",
+      cache: "no-store",
+      headers: {
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+      },
+    });
+
     if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
     return await res.text();
+  }
+
+  // Retry “refreshdata” to chase Google’s published snapshot propagation.
+  async function fetchSheetCSVWithRetries(csvUrl, debugLog, attempts = 5, delaysMs = [0, 1500, 3000, 6000, 10000]) {
+    let lastText = null;
+
+    for (let i = 0; i < attempts; i++) {
+      const d = delaysMs[i] ?? 0;
+      if (d > 0) {
+        debugLog?.(`Refresh retry ${i + 1}/${attempts}: waiting ${d}ms…`);
+        await sleep(d);
+      } else {
+        debugLog?.(`Refresh retry ${i + 1}/${attempts}: fetching…`);
+      }
+
+      const text = await fetchSheetCSV(csvUrl);
+
+      if (lastText !== null && text !== lastText) {
+        debugLog?.(`Refresh: detected changed CSV on attempt ${i + 1}.`);
+        return text;
+      }
+
+      lastText = text;
+    }
+
+    debugLog?.(`Refresh: no change detected after ${attempts} attempts; using last fetch.`);
+    return lastText;
   }
 
   function detectPerformerCount(rows) {
@@ -504,7 +543,7 @@
       els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
     };
 
-    els.fsBtn.addEventListener("click", async () => {
+    els.fsBtn?.addEventListener("click", async () => {
       await requestFullscreen();
       debugLog("Requested fullscreen.");
     });
@@ -532,6 +571,7 @@
       els.dbgLeft.textContent = `Loading CSV…`;
     }
 
+    // Initial fetch+parse
     let raw;
     try {
       raw = await fetchSheetCSV(q.csv);
@@ -614,19 +654,17 @@
 
       const rebuildSchedule = () => {
         const nowPerf = performance.now();
-        const scheduled = cues.map((c, idx) => ({
+        return cues.map((c, idx) => ({
           idx,
           cue: c,
           duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
         }))
         .filter(item => item.duePerfMs > nowPerf + 20 && !firedRaw.has(item.cue.raw))
         .sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
-
-        debugLog(`Rebuilt schedule: ${scheduled.length} pending cues.`);
-        return scheduled;
       };
 
       let scheduled = rebuildSchedule();
+      debugLog(`Initial pending cues: ${scheduled.length}`);
       let i = 0;
 
       while (i < scheduled.length) {
@@ -642,10 +680,11 @@
           debugLog(`FIRE: ${item.cue.raw}`);
         }
 
+        // Refresh command: retry-fetch to chase Google publish lag
         if (isRefreshCommand(item.cue.action)) {
-          debugLog("CMD=refreshdata → fetching latest CSV…");
+          debugLog("CMD=refreshdata → fetching latest CSV (with retries)…");
           try {
-            const newRaw = await fetchSheetCSV(q.csv);
+            const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
             const newRows = parseCSV(newRaw);
             const newLines = pickColumnLines(newRows, pSelected);
             const newBuilt = buildCuesFromLines(newLines);
@@ -655,6 +694,7 @@
 
             debugLog(`Refresh OK: cues=${cues.length}, errors=${errors.length}`);
             scheduled = rebuildSchedule();
+            debugLog(`After refresh, pending cues: ${scheduled.length}`);
             i = 0;
             continue; // invisible to user
           } catch (e) {
