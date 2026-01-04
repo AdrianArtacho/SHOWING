@@ -233,6 +233,20 @@ SOUND&TEXT=assets/audio/a.mp3 Listen carefully
 
 ---
 
+### 5.3 Repeating actions `(rN)`
+
+Actions can optionally be marked as **repeating** by adding `(rN)` to the time specification, where `N` is a number of seconds.
+For example:
+
+```
+20:50:00+3(r10)s CMD=refreshdata
+```
+
+This means: *at 20:50:03, display the text once, and then repeat the same action every 10 seconds until the next scheduled action occurs (or until the end of the piece).*
+The repetition applies to **all action types** (`TEXT`, `IMAGE`, `SOUND`, `SOUND&IMAGE`, `CMD`, etc.). When a new cue is reached, any ongoing repetition is automatically stopped and replaced by the next action.
+
+---
+
 ## 6. Refreshing the score during the show
 
 You can **edit the Google Sheet while the show is running**.
