@@ -226,6 +226,18 @@
     return rows;
   }
 
+
+  // helper functions for iOS devices
+  function isIOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent)
+      && !window.MSStream;
+  }
+  
+  function isStandaloneIOS() {
+    // true when launched from "Add to Home Screen"
+    return window.navigator.standalone === true;
+  }
+
   // "<timeSpec> <ACTION=...>"
   // timeSpec: "0:0:0+6s" or "20:34:00+23s" with optional jitter: "+3(r10)s"
   function parseCueLine(line) {
@@ -557,6 +569,21 @@
     if (q.debug) {
       debugLog("Tip: For true fullscreen on iOS, use 'Add to Home Screen'.");
     }
+    // iOS fullscreen hint (shown even without debug)
+    if (isIOS() && !isStandaloneIOS()) {
+      const msg = document.createElement("div");
+      msg.className = "hint";
+      msg.style.maxWidth = "32rem";
+      msg.style.opacity = "0.7";
+      msg.style.fontSize = "14px";
+      msg.style.marginTop = "12px";
+      msg.textContent =
+        "For a fully immersive experience on iPhone/iPad, use “Add to Home Screen”.";
+    
+      // Append below the Start button
+      els.welcome.appendChild(msg);
+    }
+
 
     if (!q.csv) {
       els.startBtn.disabled = true;
