@@ -49,6 +49,10 @@ The actions refered there, are described in another sheet ('Aktionen')
 
 ![actions](img/actions.png)
 
+And the letters that the time intervals refer to are ['**anchors**'](https://docs.google.com/spreadsheets/d/1ax-qEYPj7ZKxs-lyc61jOVHsFHbUBr_XQTCiB127cjQ/edit?gid=258500460#gid=258500460) to specific fixed times that can be edited independently of the score:
+
+![anchors](img/anchors.png)
+
 ### 3.2 Spreadsheet structure
 
 From there, a csv ([*_showing*](https://docs.google.com/spreadsheets/d/1ax-qEYPj7ZKxs-lyc61jOVHsFHbUBr_XQTCiB127cjQ/edit?gid=584592538#gid=584592538)) is parsed, with the following structure:
