@@ -554,6 +554,9 @@
       els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
     };
 
+    if (q.debug) {
+      debugLog("Tip: For true fullscreen on iOS, use 'Add to Home Screen'.");
+    }
 
     if (!q.csv) {
       els.startBtn.disabled = true;
