@@ -554,10 +554,6 @@
       els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
     };
 
-    els.fsBtn?.addEventListener("click", async () => {
-      await requestFullscreen();
-      debugLog("Requested fullscreen.");
-    });
 
     if (!q.csv) {
       els.startBtn.disabled = true;
