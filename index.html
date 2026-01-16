@@ -189,10 +189,12 @@
     const u = new URL(window.location.href);
     const dbg = (u.searchParams.get("debug") || "").toLowerCase();
     const pRaw = (u.searchParams.get("p") || "1").toLowerCase().trim();
+    const overlapRaw = (u.searchParams.get("overlap") || "no").toLowerCase().trim();
     return {
       csv: u.searchParams.get("csv") || "",
       pRaw,
       debug: (dbg === "1" || dbg === "true" || dbg === "yes"),
+      overlap: (overlapRaw === "1" || overlapRaw === "true" || overlapRaw === "yes"),
       voteUrl: u.searchParams.get("vote") || "",  // Apps Script Web App /exec
       showId: u.searchParams.get("show") || ""    // optional label stored with votes
     };
@@ -330,6 +332,22 @@
     if (dueWall.getTime() < startDate.getTime()) dueWall.setDate(dueWall.getDate() + 1);
 
     return startPerfNow + (dueWall.getTime() - startDate.getTime());
+  }
+
+  function isRelativeTimeSpec(timeSpec) {
+    return !!timeSpec && timeSpec.hh === 0 && timeSpec.mm === 0 && timeSpec.ss === 0;
+  }
+
+  // Earliest cue that is tied to a fixed wall time (i.e., NOT 0:0:0+...)
+  function computeEarliestFixedDuePerfMs(cues, startDate, startPerfNow) {
+    let min = Infinity;
+    for (const c of (cues || [])) {
+      if (!c?.timeSpec) continue;
+      if (isRelativeTimeSpec(c.timeSpec)) continue;
+      const due = computeDuePerfMs(c.timeSpec, startDate, startPerfNow);
+      if (Number.isFinite(due)) min = Math.min(min, due);
+    }
+    return Number.isFinite(min) ? min : null;
   }
 
   const els = {
@@ -672,6 +690,7 @@
       els.welcomeInfo.innerHTML =
         `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
          p: <span class="mono">${q.pRaw}</span><br>
+         overlap: <span class="mono">${q.overlap ? "yes" : "no"}</span><br>
          vote: <span class="mono">${(q.voteUrl || "(none)").replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
          show: <span class="mono">${q.showId || "(none)"}</span>`;
       els.dbgLeft.textContent = `Loading CSV…`;
@@ -797,14 +816,30 @@
 
       const firedRaw = new Set();
 
+      // When the earliest *fixed-time* cue is reached, we can optionally ignore
+      // all remaining relative cues (0:0:0+...) unless &overlap=yes.
+      let lastIgnoreRelative = null;
+
       const rebuildSchedule = () => {
         const nowPerf = performance.now();
+        const earliestFixedDuePerfMs = computeEarliestFixedDuePerfMs(cues, startDate, startPerf);
+        const ignoreRelativeNow = (!q.overlap && earliestFixedDuePerfMs !== null && nowPerf >= earliestFixedDuePerfMs - 20);
+
+        if (ignoreRelativeNow !== lastIgnoreRelative) {
+          debugLog(ignoreRelativeNow
+            ? "Overlap=no: first fixed-time cue reached → ignoring remaining 0:0:0+... cues."
+            : "Overlap=no: 0:0:0+... cues still active (fixed-time cue not reached yet or none exists)."
+          );
+          lastIgnoreRelative = ignoreRelativeNow;
+        }
+
         return cues.map((c, idx) => ({
           idx,
           cue: c,
           duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
         }))
         .filter(item => item.duePerfMs > nowPerf + 20 && !firedRaw.has(item.cue.raw))
+        .filter(item => !(ignoreRelativeNow && isRelativeTimeSpec(item.cue.timeSpec)))
         .sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
       };
 
