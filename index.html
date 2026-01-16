@@ -190,11 +190,17 @@
     const dbg = (u.searchParams.get("debug") || "").toLowerCase();
     const pRaw = (u.searchParams.get("p") || "1").toLowerCase().trim();
     const overlapRaw = (u.searchParams.get("overlap") || "no").toLowerCase().trim();
+    const refreshRaw = (u.searchParams.get("refresh") || "").trim();
+    const refreshSeconds = (() => {
+      const n = Number(refreshRaw);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    })();
     return {
       csv: u.searchParams.get("csv") || "",
       pRaw,
       debug: (dbg === "1" || dbg === "true" || dbg === "yes"),
       overlap: (overlapRaw === "1" || overlapRaw === "true" || overlapRaw === "yes"),
+      refreshSeconds,
       voteUrl: u.searchParams.get("vote") || "",  // Apps Script Web App /exec
       showId: u.searchParams.get("show") || ""    // optional label stored with votes
     };
@@ -691,6 +697,7 @@
         `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
          p: <span class="mono">${q.pRaw}</span><br>
          overlap: <span class="mono">${q.overlap ? "yes" : "no"}</span><br>
+         refresh: <span class="mono">${q.refreshSeconds > 0 ? q.refreshSeconds : "(none)"}</span><br>
          vote: <span class="mono">${(q.voteUrl || "(none)").replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
          show: <span class="mono">${q.showId || "(none)"}</span>`;
       els.dbgLeft.textContent = `Loading CSV…`;
@@ -772,6 +779,38 @@
       const startPerf = performance.now();
       debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
 
+      // "Timed" CSV refreshing (via ?refresh=10 etc.) should *not* touch relative cues (0:0:0+...).
+      // We keep the initially loaded relative cues and only replace fixed-time cues on refresh.
+      const baseRelativeCues = cues.filter(c => isRelativeTimeSpec(c.timeSpec));
+      const baseRelativeByRaw = new Map(baseRelativeCues.map(c => [c.raw, c]));
+
+      const mergeFixedCuesKeepingBaseRelative = (newCues) => {
+        const fixed = newCues.filter(c => !isRelativeTimeSpec(c.timeSpec));
+        const byRaw = new Map();
+        // Preserve initial relative cues first (stable across refreshes)
+        for (const c of baseRelativeCues) byRaw.set(c.raw, c);
+        // Then add/override with the refreshed fixed-time cues
+        for (const c of fixed) byRaw.set(c.raw, c);
+        return Array.from(byRaw.values());
+      };
+
+      const refreshTimedActionsOnly = async (label) => {
+        if (!q.csv) return;
+        const tag = label ? String(label) : "refresh";
+        try {
+          const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
+          const newRows = parseCSV(newRaw);
+          const newLines = pickColumnLines(newRows, pSelected);
+          const newBuilt = buildCuesFromLines(newLines);
+          cues = mergeFixedCuesKeepingBaseRelative(newBuilt.cues);
+          errors = newBuilt.errors;
+          scheduleDirty = true;
+          debugLog(`${tag}: OK (fixed cues refreshed; relative cues kept). cues=${cues.length}, errors=${errors.length}`);
+        } catch (e) {
+          debugLog(`${tag}: FAILED (${e.message})`);
+        }
+      };
+
       // repeating action state
       let repeatHandle = null;
       let repeatAction = null;
@@ -795,14 +834,7 @@
           try {
             // Repeating refreshdata keeps reading updated score
             if (repeatAction?.kind === "CMD" && isRefreshCommand(repeatAction)) {
-              const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
-              const newRows = parseCSV(newRaw);
-              const newLines = pickColumnLines(newRows, pSelected);
-              const newBuilt = buildCuesFromLines(newLines);
-              cues = newBuilt.cues;
-              errors = newBuilt.errors;
-              scheduleDirty = true;
-              debugLog(`Repeat refresh OK: cues=${cues.length}, errors=${errors.length}`);
+              await refreshTimedActionsOnly("repeat-refresh");
             } else if (repeatAction?.kind === "VOTE") {
               // don't auto-repeat vote UI; ignore repeats for VOTE
             } else {
@@ -815,6 +847,21 @@
       };
 
       const firedRaw = new Set();
+
+      // Optional periodic refresh: ?refresh=10 (seconds). Default: no refresh.
+      // This refreshes ONLY fixed-time cues; relative (0:0:0+...) cues remain as initially loaded.
+      let refreshHandle = null;
+      if (q.refreshSeconds > 0) {
+        if (!q.csv) {
+          debugLog(`refresh=${q.refreshSeconds} requested, but no ?csv=... provided → refresh disabled.`);
+        } else {
+          debugLog(`Auto-refresh enabled: every ${q.refreshSeconds}s (fixed-time cues only).`);
+          refreshHandle = setInterval(() => {
+            // Fire-and-forget; refresh function logs outcome and sets scheduleDirty.
+            refreshTimedActionsOnly(`auto-refresh (${q.refreshSeconds}s)`);
+          }, Math.max(1000, q.refreshSeconds * 1000));
+        }
+      }
 
       // When the earliest *fixed-time* cue is reached, we can optionally ignore
       // all remaining relative cues (0:0:0+...) unless &overlap=yes.
@@ -884,18 +931,7 @@
         if (act.kind === "CMD") {
           if (isRefreshCommand(act)) {
             debugLog("CMD=refreshdata fired.");
-            try {
-              const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
-              const newRows = parseCSV(newRaw);
-              const newLines = pickColumnLines(newRows, pSelected);
-              const newBuilt = buildCuesFromLines(newLines);
-              cues = newBuilt.cues;
-              errors = newBuilt.errors;
-              debugLog(`Refresh OK: cues=${cues.length}, errors=${errors.length}`);
-              scheduleDirty = true;
-            } catch (e) {
-              debugLog(`Refresh FAILED: ${e.message}`);
-            }
+            await refreshTimedActionsOnly("refreshdata");
           } else {
             debugLog(`CMD ignored/unknown: ${act.command || ""}`);
           }
@@ -969,6 +1005,11 @@
       }
 
       stopRepeat();
+      if (refreshHandle !== null) {
+        clearInterval(refreshHandle);
+        refreshHandle = null;
+        debugLog("Auto-refresh stopped.");
+      }
       clearStage();
       fitTextToBox("— end —");
       debugLog("END.");
