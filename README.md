@@ -186,7 +186,7 @@ If that time has already passed today, it is scheduled **for tomorrow**.
 
 ### 5.2 Actions
 
-#### Text
+#### TEXT
 
 ```
 TEXT=Some text to display
@@ -197,7 +197,7 @@ TEXT=Some text to display
 
 ---
 
-#### Image
+#### IMAGE
 
 ```
 IMAGE=assets/images/photo.jpg
@@ -208,20 +208,16 @@ IMAGE=assets/images/photo.jpg
 
 ---
 
-#### Sound
+#### SOUND
 
 ```
 SOUND=assets/audio/sound.mp3
 ```
 
 * Plays audio
-* Shows a centered 🎧 icon
+* Shows a centered 🔊 icon
 
 > Audio files should be hosted **inside the same GitHub Pages repo** for reliability.
-
----
-
-Absolutely! Here’s a concise paragraph you can add to your README to explain the voting behavior:
 
 ---
 
@@ -333,6 +329,160 @@ No scrolling, no interaction, no browser UI distractions.
 
    * Edit the Google Sheet
    * Let `CMD=refreshdata` adapt the score
+
+---
+
+## Overlap control (relative vs fixed-time cues)
+
+By default, SHOWING treats **relative cues** (`0:0:0+...`) as *preparatory* actions that should only happen **before** the first fixed-time event.
+
+### Default behavior
+
+Once the **earliest fixed-time cue** is reached (e.g. `20:34:00+0s`), all remaining relative cues are **ignored**.
+
+This makes it possible to:
+
+* use `0:0:0+...` for warm-ups, onboarding, or instructions
+* then “lock” the piece into a fixed-time structure once the performance begins
+
+### Override
+
+```
+&overlap=yes
+```
+
+If set, **relative and fixed-time cues can overlap freely** for the entire duration of the piece.
+
+### Summary
+
+| Mode                   | Behavior                                               |
+| ---------------------- | ------------------------------------------------------ |
+| `overlap=no` (default) | Relative cues stop once the first fixed-time cue fires |
+| `overlap=yes`          | All cues continue normally                             |
+
+---
+
+## Live score refreshing (automatic polling)
+
+In addition to `CMD=refreshdata`, SHOWING can **automatically re-fetch the CSV at a fixed interval**.
+
+### Enable
+
+```
+&refresh=10
+```
+
+→ Re-fetches the CSV every **10 seconds**
+
+### What gets refreshed
+
+* ✅ **Fixed-time cues** (absolute time cues)
+* ❌ **Relative cues (`0:0:0+...`) are never replaced**
+
+This ensures that:
+
+* onboarding / warm-up instructions remain stable
+* time-critical structure can be edited live from Google Sheets
+
+### Use case
+
+This enables a **“conductor behind the spreadsheet”** mode:
+You can rewrite upcoming timed actions during the show, and performers’ devices will adapt automatically without reloading the page.
+
+### Notes
+
+* Refreshing starts **after “Sind Sie bereit?” is pressed**
+* Google Sheets caching still applies (expect ~30–120s latency in some cases)
+* If both are used:
+
+  * `CMD=refreshdata` = manual refresh point
+  * `&refresh=10` = continuous background refresh
+
+---
+
+## Word-breaking behavior (text readability vs screen fill)
+
+SHOWING dynamically scales text to fill the screen. For long words, this can cause mid-word line breaks.
+
+### Default
+
+```
+&breakwords=no
+```
+
+Words are **never broken across lines**. Text wraps only at spaces.
+This favors **readability** over maximal screen coverage.
+
+### Override
+
+```
+&breakwords=yes
+```
+
+Long words **may be split** to allow the text to fill more of the available space.
+This favors **visual impact** and spatial density.
+
+### Summary
+
+| Mode                      | Behavior                                |
+| ------------------------- | --------------------------------------- |
+| `breakwords=no` (default) | Clean reading, no mid-word breaks       |
+| `breakwords=yes`          | Aggressive layout, maximum screen usage |
+
+---
+
+## Debug mode and sound visibility
+
+By default, sound cues are **silent visually**.
+
+### Default (performance mode)
+
+```
+&debug=no
+```
+
+* Sound plays normally
+* **No visual indicator** is shown
+* The phone behaves like an invisible score
+
+### Debug mode (rehearsal / technical)
+
+```
+&debug=yes
+```
+
+* Sound plays
+* A **🔊 emoji appears** when audio is triggered
+* Debug panel shows:
+
+  * timing
+  * parsing errors
+  * refresh activity
+  * fired cues
+
+This separates:
+
+> **performative experience** from **technical rehearsal interface**
+
+---
+
+## Full parameter summary (extended)
+
+| Parameter    | Default | Purpose                                   |
+| ------------ | ------- | ----------------------------------------- |
+| `csv`        | —       | CSV score URL (required)                  |
+| `p`          | `r`     | Performer column or `random`              |
+| `debug`      | `no`    | Show diagnostics + sound emoji            |
+| `overlap`    | `no`    | Allow relative cues after fixed-time cues |
+| `refresh`    | —       | Auto-refresh CSV every N seconds          |
+| `breakwords` | `no`    | Allow mid-word text breaking              |
+| `vote`       | —       | Google Apps Script vote endpoint          |
+| `show`       | —       | Optional show/session label               |
+
+---
+
+If you’d like, I can also give you a **one-page “cheat sheet” version** of this (PDF/printable) for students and collaborators — this is already at the level of a *micro-score language spec*, which is very on-brand for your transmedia practice 😉
+
 
 ---
 
