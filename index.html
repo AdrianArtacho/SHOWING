@@ -543,7 +543,7 @@
 
     if (action.kind === "SOUND") {
       els.textCue.style.display = "none";
-      els.audioCue.style.display = "block";
+      els.audioCue.style.display = q.debug ? "block" : "none";
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
@@ -552,14 +552,14 @@
       els.textCue.style.display = "none";
       els.imgCue.style.display = "block";
       els.imgCue.src = action.imageUrl || "";
-      els.audioCue.style.display = "block";
+      els.audioCue.style.display = q.debug ? "block" : "none";
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
     }
 
     if (action.kind === "SOUND&TEXT") {
       els.textCue.style.display = "block";
-      els.audioCue.style.display = "block";
+      els.audioCue.style.display = q.debug ? "block" : "none";
       fitTextToBox(action.text || "");
       await playSound(action.soundUrl || "", audioCtx, debugLog);
       return;
