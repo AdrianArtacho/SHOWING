@@ -340,3 +340,7 @@ No scrolling, no interaction, no browser UI distractions.
 
 This project is designed by [Adrián Artacho](https://www.artacho.at/) for **artistic, educational, and experimental use**.
 Feel free to fork, adapt, and remix it for your own performances.
+
+---
+
+## [To-Do](https://trello.com/c/SrvTCYNW/281-showing)
