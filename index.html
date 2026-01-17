@@ -63,7 +63,8 @@
 
     #textCue {
       white-space: pre-wrap;
-      word-break: break-word;
+      word-break: normal;
+      overflow-wrap: normal;
       line-height: 1.08;
       width: 100%;
     }
@@ -191,6 +192,7 @@
     const pRaw = (u.searchParams.get("p") || "1").toLowerCase().trim();
     const overlapRaw = (u.searchParams.get("overlap") || "no").toLowerCase().trim();
     const refreshRaw = (u.searchParams.get("refresh") || "").trim();
+    const breakRaw = (u.searchParams.get("breakwords") || "no").toLowerCase().trim();
     const refreshSeconds = (() => {
       const n = Number(refreshRaw);
       return Number.isFinite(n) && n > 0 ? n : 0;
@@ -201,6 +203,7 @@
       debug: (dbg === "1" || dbg === "true" || dbg === "yes"),
       overlap: (overlapRaw === "1" || overlapRaw === "true" || overlapRaw === "yes"),
       refreshSeconds,
+      breakWords: (breakRaw === "1" || breakRaw === "true" || breakRaw === "yes"),
       voteUrl: u.searchParams.get("vote") || "",  // Apps Script Web App /exec
       showId: u.searchParams.get("show") || ""    // optional label stored with votes
     };
@@ -375,6 +378,17 @@
     dbgRight: $("dbgRight"),
     debugLog: $("debugLog"),
   };
+
+  function applyBreakWordsMode(q) {
+    // Default: breakwords=no (do NOT break words)
+    if (q.breakWords) {
+      els.textCue.style.wordBreak = 'break-word';
+      els.textCue.style.overflowWrap = 'anywhere';
+    } else {
+      els.textCue.style.wordBreak = 'normal';
+      els.textCue.style.overflowWrap = 'normal';
+    }
+  }
 
   function clearStage() {
     els.textCue.textContent = "";
@@ -654,6 +668,7 @@
 
   async function run() {
     const q = parseQuery();
+    applyBreakWordsMode(q);
     const sessionId = getOrCreateSessionId();
 
     if (q.debug) els.debugWrap.classList.remove("hidden");
