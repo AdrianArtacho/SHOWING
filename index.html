@@ -63,9 +63,9 @@
 
     #textCue {
       white-space: pre-wrap;
+      word-break: break-word;
       line-height: 1.08;
       width: 100%;
-      /* word breaking is controlled dynamically via JS */
     }
 
     #imgCue {
@@ -191,23 +191,169 @@
     const pRaw = (u.searchParams.get("p") || "1").toLowerCase().trim();
     const overlapRaw = (u.searchParams.get("overlap") || "no").toLowerCase().trim();
     const refreshRaw = (u.searchParams.get("refresh") || "").trim();
-    const breakRaw = (u.searchParams.get("breakwords") || "no").toLowerCase().trim();
-
     const refreshSeconds = (() => {
       const n = Number(refreshRaw);
       return Number.isFinite(n) && n > 0 ? n : 0;
     })();
-
     return {
       csv: u.searchParams.get("csv") || "",
       pRaw,
       debug: (dbg === "1" || dbg === "true" || dbg === "yes"),
       overlap: (overlapRaw === "1" || overlapRaw === "true" || overlapRaw === "yes"),
       refreshSeconds,
-      breakWords: (breakRaw === "1" || breakRaw === "true" || breakRaw === "yes"),
-      voteUrl: u.searchParams.get("vote") || "",
-      showId: u.searchParams.get("show") || ""
+      voteUrl: u.searchParams.get("vote") || "",  // Apps Script Web App /exec
+      showId: u.searchParams.get("show") || ""    // optional label stored with votes
     };
+  }
+
+  function nowLocalHMS() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  }
+
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function isIOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  }
+  function isStandaloneIOS() {
+    return window.navigator.standalone === true;
+  }
+
+  function getOrCreateSessionId() {
+    try {
+      const k = "showing_session_id_v1";
+      let v = localStorage.getItem(k);
+      if (!v) {
+        v = (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+        localStorage.setItem(k, v);
+      }
+      return v;
+    } catch (_) {
+      return (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+    }
+  }
+
+  // Minimal CSV parser (handles quotes + embedded newlines)
+  function parseCSV(text) {
+    const rows = [];
+    let row = [];
+    let cell = "";
+    let inQuotes = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      const n = text[i + 1];
+
+      if (c === '"' && inQuotes && n === '"') { cell += '"'; i++; continue; }
+      if (c === '"') { inQuotes = !inQuotes; continue; }
+
+      if (!inQuotes && (c === "," || c === "\n" || c === "\r")) {
+        if (c === "\r" && n === "\n") i++;
+        row.push(cell.trim());
+        cell = "";
+        if (c !== ",") {
+          if (row.some(v => v.length > 0)) rows.push(row);
+          row = [];
+        }
+        continue;
+      }
+
+      cell += c;
+    }
+
+    if (cell.length || row.length) {
+      row.push(cell.trim());
+      if (row.some(v => v.length > 0)) rows.push(row);
+    }
+
+    return rows;
+  }
+
+  // timeSpec: "0:0:0+6s" or "20:34:00+23s"
+  // Optional repeat: "0:0:0+3(r10)s" => repeat action every 10s until next cue.
+  function parseCueLine(line) {
+    const trimmed = (line || "").trim();
+    if (!trimmed) return null;
+
+    const m0 = trimmed.match(/^(\S+)\s+([\s\S]+)$/);
+    if (!m0) return { raw: trimmed, error: "Missing whitespace between timeSpec and action." };
+
+    const timeSpec = m0[1].trim();
+    const actionSpec = m0[2].trim();
+
+    const m = timeSpec.match(/^(\d{1,2}):(\d{1,2}):(\d{1,2})\+(\d+)(?:\(r(\d+)\))?s$/);
+    if (!m) return { raw: trimmed, error: `Bad timeSpec: "${timeSpec}"` };
+
+    const hh = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    const ss = parseInt(m[3], 10);
+    const plus = parseInt(m[4], 10);
+    const repeatEvery = m[5] ? parseInt(m[5], 10) : null;
+
+    const actionMatch = actionSpec.match(/^([A-Z&]+)=([\s\S]*)$/);
+    if (!actionMatch) return { raw: trimmed, error: `Bad actionSpec: "${actionSpec}"` };
+
+    const kind = actionMatch[1].trim().toUpperCase();
+    const payload = (actionMatch[2] || "").trim();
+
+    let action = { kind, payload };
+
+    if (kind === "SOUND&IMAGE") {
+      const parts = payload.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return { raw: trimmed, error: "SOUND&IMAGE needs soundUrl and imageUrl." };
+      action = { kind, soundUrl: parts[0], imageUrl: parts.slice(1).join(" ") };
+    } else if (kind === "SOUND&TEXT") {
+      const parts = payload.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return { raw: trimmed, error: "SOUND&TEXT needs a soundUrl then text." };
+      action = { kind, soundUrl: parts[0], text: parts.slice(1).join(" ") };
+    } else if (kind === "SOUND") {
+      action = { kind, soundUrl: payload };
+    } else if (kind === "IMAGE") {
+      action = { kind, imageUrl: payload };
+    } else if (kind === "TEXT") {
+      action = { kind, text: payload };
+    } else if (kind === "CMD") {
+      action = { kind, command: payload };
+    } else if (kind === "VOTE") {
+      action = { kind, voteSpec: payload };
+    }
+
+    return { raw: trimmed, timeSpec: { hh, mm, ss, plus }, repeatEvery, action };
+  }
+
+  function computeDuePerfMs(timeSpec, startDate, startPerfNow) {
+    const { hh, mm, ss, plus } = timeSpec;
+    const isRelative = (hh === 0 && mm === 0 && ss === 0);
+
+    if (isRelative) return startPerfNow + plus * 1000;
+
+    const base = new Date(startDate);
+    base.setHours(hh, mm, ss, 0);
+    const dueWall = new Date(base.getTime() + plus * 1000);
+
+    if (dueWall.getTime() < startDate.getTime()) dueWall.setDate(dueWall.getDate() + 1);
+
+    return startPerfNow + (dueWall.getTime() - startDate.getTime());
+  }
+
+  function isRelativeTimeSpec(timeSpec) {
+    return !!timeSpec && timeSpec.hh === 0 && timeSpec.mm === 0 && timeSpec.ss === 0;
+  }
+
+  // Earliest cue that is tied to a fixed wall time (i.e., NOT 0:0:0+...)
+  function computeEarliestFixedDuePerfMs(cues, startDate, startPerfNow) {
+    let min = Infinity;
+    for (const c of (cues || [])) {
+      if (!c?.timeSpec) continue;
+      if (isRelativeTimeSpec(c.timeSpec)) continue;
+      const due = computeDuePerfMs(c.timeSpec, startDate, startPerfNow);
+      if (Number.isFinite(due)) min = Math.min(min, due);
+    }
+    return Number.isFinite(min) ? min : null;
   }
 
   const els = {
@@ -230,14 +376,15 @@
     debugLog: $("debugLog"),
   };
 
-  function applyBreakWordMode(q) {
-    if (q.breakWords) {
-      els.textCue.style.wordBreak = "break-word";
-      els.textCue.style.overflowWrap = "anywhere";
-    } else {
-      els.textCue.style.wordBreak = "normal";
-      els.textCue.style.overflowWrap = "normal";
-    }
+  function clearStage() {
+    els.textCue.textContent = "";
+    els.textCue.style.display = "block";
+    els.textCue.style.fontSize = "24px";
+    els.imgCue.style.display = "none";
+    els.imgCue.src = "";
+    els.audioCue.style.display = "none";
+    els.voteWrap.style.display = "none";
+    els.voteGrid.innerHTML = "";
   }
 
   function fitTextToBox(text) {
@@ -258,21 +405,615 @@
     els.textCue.style.fontSize = best + "px";
   }
 
+  function isDebugOnlyText(action) {
+    if (!action || action.kind !== "TEXT") return false;
+    return (action.text || "").trim().startsWith("VERSION=");
+  }
+
+  async function playSound(url, audioCtx, debugLogFn) {
+    const cleanUrl = (url || "").trim();
+    if (!cleanUrl) return;
+
+    if (location.protocol === "https:" && cleanUrl.startsWith("http:")) {
+      debugLogFn?.(`Audio blocked (mixed content): ${cleanUrl}`);
+      throw new Error("Mixed content (http audio on https page).");
+    }
+
+    if (audioCtx) {
+      try {
+        const res = await fetch(cleanUrl, { mode: "cors", cache: "no-store" });
+        if (!res.ok) throw new Error(`Fetch ${res.status} ${res.statusText}`);
+        const buf = await res.arrayBuffer();
+        const audioBuffer = await audioCtx.decodeAudioData(buf);
+        const src = audioCtx.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(audioCtx.destination);
+        src.start();
+        debugLogFn?.(`WebAudio OK: ${cleanUrl}`);
+        return;
+      } catch (e) {
+        debugLogFn?.(`WebAudio failed: ${e.message}`);
+      }
+    }
+
+    const a = new Audio(cleanUrl);
+    a.preload = "auto";
+    a.crossOrigin = "anonymous";
+    await a.play();
+    debugLogFn?.(`HTMLAudio OK: ${cleanUrl}`);
+  }
+
+  function parseInlineAction(actionStr) {
+    const s = (actionStr || "").trim();
+    const m = s.match(/^([A-Z&]+)=([\s\S]*)$/);
+    if (!m) return null;
+
+    const kind = m[1].trim().toUpperCase();
+    const payload = (m[2] || "").trim();
+
+    if (kind === "SOUND&IMAGE") {
+      const parts = payload.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return null;
+      return { kind, soundUrl: parts[0], imageUrl: parts.slice(1).join(" ") };
+    }
+    if (kind === "SOUND&TEXT") {
+      const parts = payload.split(/\s+/).filter(Boolean);
+      if (parts.length < 2) return null;
+      return { kind, soundUrl: parts[0], text: parts.slice(1).join(" ") };
+    }
+    if (kind === "SOUND") return { kind, soundUrl: payload };
+    if (kind === "IMAGE") return { kind, imageUrl: payload };
+    if (kind === "TEXT") return { kind, text: payload };
+    if (kind === "CMD") return { kind, command: payload };
+    if (kind === "VOTE") return { kind, voteSpec: payload };
+    return { kind, payload };
+  }
+
+  // Parses: [Option A](TEXT=...) [Option B](IMAGE=...) ...
+  // Allows whitespace/newlines between parts.
+  function parseVoteSpec(spec) {
+    const s = (spec || "").trim();
+    const out = [];
+
+    let i = 0;
+    while (i < s.length) {
+      // find '['
+      const lb = s.indexOf("[", i);
+      if (lb < 0) break;
+      const rb = s.indexOf("]", lb + 1);
+      if (rb < 0) break;
+      const label = s.slice(lb + 1, rb).trim();
+
+      // next non-space should be '('
+      let j = rb + 1;
+      while (j < s.length && /\s/.test(s[j])) j++;
+      if (s[j] !== "(") { i = rb + 1; continue; }
+
+      // parse until matching ')'
+      j++; // after '('
+      let depth = 1;
+      const start = j;
+      while (j < s.length && depth > 0) {
+        if (s[j] === "(") depth++;
+        else if (s[j] === ")") depth--;
+        j++;
+      }
+      if (depth !== 0) break;
+
+      const inner = s.slice(start, j - 1).trim();
+      const action = parseInlineAction(inner);
+      if (action) out.push({ label, action });
+
+      i = j;
+    }
+
+    return out;
+  }
+
+  async function showAction(action, audioCtx, debugLog, q) {
+    clearStage();
+
+    if (action.kind === "TEXT") {
+      if (isDebugOnlyText(action) && !q.debug) return;
+      els.textCue.style.display = "block";
+      fitTextToBox(action.text || "");
+      return;
+    }
+
+    if (action.kind === "IMAGE") {
+      els.textCue.style.display = "none";
+      els.imgCue.style.display = "block";
+      els.imgCue.src = action.imageUrl || "";
+      return;
+    }
+
+    if (action.kind === "SOUND") {
+      els.textCue.style.display = "none";
+      els.audioCue.style.display = "block";
+      await playSound(action.soundUrl || "", audioCtx, debugLog);
+      return;
+    }
+
+    if (action.kind === "SOUND&IMAGE") {
+      els.textCue.style.display = "none";
+      els.imgCue.style.display = "block";
+      els.imgCue.src = action.imageUrl || "";
+      els.audioCue.style.display = "block";
+      await playSound(action.soundUrl || "", audioCtx, debugLog);
+      return;
+    }
+
+    if (action.kind === "SOUND&TEXT") {
+      els.textCue.style.display = "block";
+      els.audioCue.style.display = "block";
+      fitTextToBox(action.text || "");
+      await playSound(action.soundUrl || "", audioCtx, debugLog);
+      return;
+    }
+
+    // VOTE handled elsewhere (needs context)
+  }
+
+  function isRefreshCommand(action) {
+    if (!action || action.kind !== "CMD") return false;
+    const cmd = String(action.command || "").trim().toLowerCase();
+    return (cmd === "refreshdata" || cmd === "refresh" || cmd === "refresh-data");
+  }
+
+  async function fetchSheetCSV(csvUrl) {
+    const u = new URL(csvUrl);
+    const buster = (crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`);
+    u.searchParams.set("cb", buster);
+
+    const res = await fetch(u.toString(), {
+      mode: "cors",
+      cache: "no-store",
+      headers: { "Cache-Control": "no-cache", "Pragma": "no-cache" },
+    });
+
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
+    return await res.text();
+  }
+
+  async function fetchSheetCSVWithRetries(csvUrl, debugLog, attempts = 5, delaysMs = [0, 1500, 3000, 6000, 10000]) {
+    let lastText = null;
+    for (let i = 0; i < attempts; i++) {
+      const d = delaysMs[i] ?? 0;
+      if (d > 0) { debugLog?.(`Refresh retry ${i + 1}/${attempts}: waiting ${d}ms…`); await sleep(d); }
+      else { debugLog?.(`Refresh retry ${i + 1}/${attempts}: fetching…`); }
+
+      const text = await fetchSheetCSV(csvUrl);
+      if (lastText !== null && text !== lastText) {
+        debugLog?.(`Refresh: detected changed CSV on attempt ${i + 1}.`);
+        return text;
+      }
+      lastText = text;
+    }
+    debugLog?.(`Refresh: no change detected after ${attempts} attempts; using last fetch.`);
+    return lastText;
+  }
+
+  function detectPerformerCount(rows) {
+    let maxCols = 0;
+    for (const r of rows) maxCols = Math.max(maxCols, r.length);
+
+    const available = [];
+    for (let c = 0; c < maxCols; c++) {
+      let hasAny = false;
+      for (let i = 0; i < rows.length; i++) {
+        const v = (rows[i][c] || "").trim();
+        if (v.length > 0) { hasAny = true; break; }
+      }
+      if (hasAny) available.push(c + 1);
+    }
+    return available;
+  }
+
+  function pickColumnLines(rows, performerIndex1Based) {
+    const col = Math.max(1, performerIndex1Based) - 1;
+    return rows.map(r => (r[col] || "").trim()).filter(v => v.length > 0);
+  }
+
+  function buildCuesFromLines(lines) {
+    const cues = [];
+    const errors = [];
+    for (const ln of lines) {
+      const cue = parseCueLine(ln);
+      if (!cue) continue;
+      if (cue.error) errors.push(cue);
+      else cues.push(cue);
+    }
+    return { cues, errors };
+  }
+
+  async function requestFullscreen() {
+    const el = document.documentElement;
+    try {
+      if (el.requestFullscreen) await el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+    } catch (_) {}
+  }
+
+  async function castVote(voteUrl, payload, debugLog) {
+    if (!voteUrl) {
+      debugLog?.("Vote URL missing (add &vote=YOUR_APPS_SCRIPT_EXEC_URL). Vote not sent.");
+      return;
+    }
+    try {
+      await fetch(voteUrl, {
+        method: "POST",
+        mode: "no-cors",                 // important: avoids CORS issues on GH Pages
+        headers: { "Content-Type": "text/plain;charset=utf-8" }, // keep it simple
+        body: JSON.stringify(payload),
+      });
+      debugLog?.("Vote sent (no-cors).");
+    } catch (e) {
+      debugLog?.(`Vote send failed: ${e.message}`);
+    }
+  }
+
   async function run() {
     const q = parseQuery();
-    applyBreakWordMode(q);
+    const sessionId = getOrCreateSessionId();
 
     if (q.debug) els.debugWrap.classList.remove("hidden");
     else els.debugWrap.classList.add("hidden");
 
-    if (q.debug) {
-      els.welcomeInfo.innerHTML =
-        `breakwords: <span class="mono">${q.breakWords ? "yes" : "no"}</span><br>
-         overlap: <span class="mono">${q.overlap ? "yes" : "no"}</span><br>
-         refresh: <span class="mono">${q.refreshSeconds > 0 ? q.refreshSeconds : "(none)"}</span>`;
+    const debugLog = (msg) => {
+      if (!q.debug) return;
+      const line = `[${nowLocalHMS()}] ${msg}`;
+      console.log(line);
+      els.debugLog.textContent += line + "\n";
+      els.debugLog.scrollTop = els.debugLog.scrollHeight;
+      els.dbgRight.textContent = `Now ${nowLocalHMS()}`;
+    };
+
+    // Optional: hide title+tip unless debug
+    if (!q.debug) {
+      els.welcomeTitle.classList.add("hidden");
+      els.welcomeTip.classList.add("hidden");
     }
 
-    // everything else continues unchanged...
+    // iOS hint even without debug (only on Safari browser, not standalone)
+    if (isIOS() && !isStandaloneIOS()) {
+      const msg = document.createElement("div");
+      msg.className = "hint";
+      msg.style.maxWidth = "32rem";
+      msg.style.opacity = "0.7";
+      msg.style.fontSize = "14px";
+      msg.style.marginTop = "12px";
+      msg.textContent = "For a fully immersive experience on iPhone/iPad, use “Add to Home Screen”.";
+      els.welcome.appendChild(msg);
+    }
+
+    if (!q.csv) {
+      els.startBtn.disabled = true;
+      if (q.debug) els.welcomeInfo.innerHTML = `Missing <span class="mono">?csv=...</span> URL parameter.`;
+      return;
+    }
+
+    if (q.debug) {
+      els.welcomeInfo.innerHTML =
+        `CSV: <span class="mono">${q.csv.replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
+         p: <span class="mono">${q.pRaw}</span><br>
+         overlap: <span class="mono">${q.overlap ? "yes" : "no"}</span><br>
+         refresh: <span class="mono">${q.refreshSeconds > 0 ? q.refreshSeconds : "(none)"}</span><br>
+         vote: <span class="mono">${(q.voteUrl || "(none)").replaceAll("<","&lt;").replaceAll(">","&gt;")}</span><br>
+         show: <span class="mono">${q.showId || "(none)"}</span>`;
+      els.dbgLeft.textContent = `Loading CSV…`;
+    }
+
+    let raw;
+    try {
+      raw = await fetchSheetCSV(q.csv);
+      debugLog(`CSV fetched (${raw.length} chars).`);
+    } catch (e) {
+      els.startBtn.disabled = true;
+      debugLog(`CSV fetch failed: ${e.message}`);
+      if (q.debug) els.welcomeError.textContent = `Could not fetch CSV. Error: ${e.message}`;
+      return;
+    }
+
+    const rows = parseCSV(raw);
+    const availablePerformers = detectPerformerCount(rows);
+    if (availablePerformers.length === 0) {
+      els.startBtn.disabled = true;
+      debugLog("No performer columns with any data.");
+      if (q.debug) els.welcomeError.textContent = "No performer columns with any data.";
+      return;
+    }
+
+    let pSelected;
+    if (q.pRaw === "random" || q.pRaw === "r") {
+      pSelected = availablePerformers[Math.floor(Math.random() * availablePerformers.length)];
+      debugLog(`p=random → selected performer p=${pSelected} from [${availablePerformers.join(", ")}]`);
+    } else {
+      const pNum = parseInt(q.pRaw, 10);
+      pSelected = Number.isFinite(pNum) && pNum > 0 ? pNum : 1;
+      debugLog(`Selected performer p=${pSelected}`);
+    }
+
+    let lines = pickColumnLines(rows, pSelected);
+    let built = buildCuesFromLines(lines);
+    let cues = built.cues;
+    let errors = built.errors;
+
+    debugLog(`Rows parsed: ${rows.length}`);
+    debugLog(`Available performers: [${availablePerformers.join(", ")}]`);
+    debugLog(`Lines in column p=${pSelected}: ${lines.length}`);
+    debugLog(`Cues OK: ${cues.length}, errors: ${errors.length}`);
+
+    if (q.debug) {
+      els.dbgLeft.textContent = `Loaded ${cues.length} cues (p=${pSelected})`;
+      if (errors.length) {
+        els.welcomeError.textContent =
+          "Some lines could not be parsed:\n" +
+          errors.slice(0, 10).map(e => `- ${e.raw}  (${e.error})`).join("\n");
+      } else {
+        els.welcomeError.textContent = "";
+      }
+    }
+
+    els.startBtn.addEventListener("click", async () => {
+      await requestFullscreen();
+      els.welcome.classList.add("hidden");
+      els.stage.classList.remove("hidden");
+
+      // Unlock audio
+      let audioCtx = null;
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0.00001;
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.01);
+        await audioCtx.resume();
+        debugLog(`AudioContext state: ${audioCtx.state}`);
+      } catch (e) {
+        debugLog(`AudioContext unavailable/unlock failed: ${e.message}`);
+      }
+
+      const startDate = new Date();
+      const startPerf = performance.now();
+      debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
+
+      // "Timed" CSV refreshing (via ?refresh=10 etc.) should *not* touch relative cues (0:0:0+...).
+      // We keep the initially loaded relative cues and only replace fixed-time cues on refresh.
+      const baseRelativeCues = cues.filter(c => isRelativeTimeSpec(c.timeSpec));
+      const baseRelativeByRaw = new Map(baseRelativeCues.map(c => [c.raw, c]));
+
+      const mergeFixedCuesKeepingBaseRelative = (newCues) => {
+        const fixed = newCues.filter(c => !isRelativeTimeSpec(c.timeSpec));
+        const byRaw = new Map();
+        // Preserve initial relative cues first (stable across refreshes)
+        for (const c of baseRelativeCues) byRaw.set(c.raw, c);
+        // Then add/override with the refreshed fixed-time cues
+        for (const c of fixed) byRaw.set(c.raw, c);
+        return Array.from(byRaw.values());
+      };
+
+      const refreshTimedActionsOnly = async (label) => {
+        if (!q.csv) return;
+        const tag = label ? String(label) : "refresh";
+        try {
+          const newRaw = await fetchSheetCSVWithRetries(q.csv, debugLog);
+          const newRows = parseCSV(newRaw);
+          const newLines = pickColumnLines(newRows, pSelected);
+          const newBuilt = buildCuesFromLines(newLines);
+          cues = mergeFixedCuesKeepingBaseRelative(newBuilt.cues);
+          errors = newBuilt.errors;
+          scheduleDirty = true;
+          debugLog(`${tag}: OK (fixed cues refreshed; relative cues kept). cues=${cues.length}, errors=${errors.length}`);
+        } catch (e) {
+          debugLog(`${tag}: FAILED (${e.message})`);
+        }
+      };
+
+      // repeating action state
+      let repeatHandle = null;
+      let repeatAction = null;
+      let scheduleDirty = false;
+
+      const stopRepeat = () => {
+        if (repeatHandle !== null) {
+          clearInterval(repeatHandle);
+          repeatHandle = null;
+          repeatAction = null;
+          debugLog("Stopped repeating action.");
+        }
+      };
+
+      const startRepeat = (action, everySeconds) => {
+        stopRepeat();
+        if (!everySeconds || everySeconds <= 0) return;
+        repeatAction = action;
+        debugLog(`Repeat ON: every ${everySeconds}s until next cue.`);
+        repeatHandle = setInterval(async () => {
+          try {
+            // Repeating refreshdata keeps reading updated score
+            if (repeatAction?.kind === "CMD" && isRefreshCommand(repeatAction)) {
+              await refreshTimedActionsOnly("repeat-refresh");
+            } else if (repeatAction?.kind === "VOTE") {
+              // don't auto-repeat vote UI; ignore repeats for VOTE
+            } else {
+              await showAction(repeatAction, audioCtx, debugLog, q);
+            }
+          } catch (e) {
+            debugLog(`Repeat action failed: ${e.message}`);
+          }
+        }, everySeconds * 1000);
+      };
+
+      const firedRaw = new Set();
+
+      // Optional periodic refresh: ?refresh=10 (seconds). Default: no refresh.
+      // This refreshes ONLY fixed-time cues; relative (0:0:0+...) cues remain as initially loaded.
+      let refreshHandle = null;
+      if (q.refreshSeconds > 0) {
+        if (!q.csv) {
+          debugLog(`refresh=${q.refreshSeconds} requested, but no ?csv=... provided → refresh disabled.`);
+        } else {
+          debugLog(`Auto-refresh enabled: every ${q.refreshSeconds}s (fixed-time cues only).`);
+          refreshHandle = setInterval(() => {
+            // Fire-and-forget; refresh function logs outcome and sets scheduleDirty.
+            refreshTimedActionsOnly(`auto-refresh (${q.refreshSeconds}s)`);
+          }, Math.max(1000, q.refreshSeconds * 1000));
+        }
+      }
+
+      // When the earliest *fixed-time* cue is reached, we can optionally ignore
+      // all remaining relative cues (0:0:0+...) unless &overlap=yes.
+      let lastIgnoreRelative = null;
+
+      const rebuildSchedule = () => {
+        const nowPerf = performance.now();
+        const earliestFixedDuePerfMs = computeEarliestFixedDuePerfMs(cues, startDate, startPerf);
+        const ignoreRelativeNow = (!q.overlap && earliestFixedDuePerfMs !== null && nowPerf >= earliestFixedDuePerfMs - 20);
+
+        if (ignoreRelativeNow !== lastIgnoreRelative) {
+          debugLog(ignoreRelativeNow
+            ? "Overlap=no: first fixed-time cue reached → ignoring remaining 0:0:0+... cues."
+            : "Overlap=no: 0:0:0+... cues still active (fixed-time cue not reached yet or none exists)."
+          );
+          lastIgnoreRelative = ignoreRelativeNow;
+        }
+
+        return cues.map((c, idx) => ({
+          idx,
+          cue: c,
+          duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
+        }))
+        .filter(item => item.duePerfMs > nowPerf + 20 && !firedRaw.has(item.cue.raw))
+        .filter(item => !(ignoreRelativeNow && isRelativeTimeSpec(item.cue.timeSpec)))
+        .sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
+      };
+
+      const waitUntil = async (targetPerfMs) => {
+        while (performance.now() < targetPerfMs) {
+          if (scheduleDirty) return false;
+          const remaining = targetPerfMs - performance.now();
+          await sleep(Math.min(200, Math.max(10, remaining)));
+        }
+        return true;
+      };
+
+      let scheduled = rebuildSchedule();
+      debugLog(`Initial pending cues: ${scheduled.length}`);
+      let i = 0;
+
+      while (true) {
+        if (scheduleDirty) {
+          scheduleDirty = false;
+          scheduled = rebuildSchedule();
+          debugLog(`Schedule rebuilt (dirty). Pending cues: ${scheduled.length}`);
+          i = 0;
+          if (scheduled.length === 0) break;
+        }
+        if (i >= scheduled.length) break;
+
+        const item = scheduled[i];
+        const ok = await waitUntil(item.duePerfMs);
+        if (!ok) continue;
+
+        stopRepeat(); // stop repeat exactly when next cue fires
+        firedRaw.add(item.cue.raw);
+
+        if (q.debug) {
+          els.dbgLeft.textContent = `Cue ${i + 1}/${scheduled.length} (p=${pSelected})`;
+          debugLog(`FIRE: ${item.cue.raw}`);
+        }
+
+        const act = item.cue.action;
+
+        // CMD
+        if (act.kind === "CMD") {
+          if (isRefreshCommand(act)) {
+            debugLog("CMD=refreshdata fired.");
+            await refreshTimedActionsOnly("refreshdata");
+          } else {
+            debugLog(`CMD ignored/unknown: ${act.command || ""}`);
+          }
+          if (item.cue.repeatEvery && item.cue.repeatEvery > 0) startRepeat(act, item.cue.repeatEvery);
+          i++;
+          continue;
+        }
+
+        // VOTE
+        if (act.kind === "VOTE") {
+          clearStage();
+
+          const options = parseVoteSpec(act.voteSpec || "");
+          if (!options.length) {
+            if (q.debug) debugLog("VOTE parse failed: no options found.");
+            i++;
+            continue;
+          }
+
+          els.voteWrap.style.display = "block";
+          els.voteGrid.innerHTML = "";
+
+          // build buttons
+          options.forEach((opt, idx) => {
+            const b = document.createElement("button");
+            b.className = "voteBtn";
+            b.type = "button";
+            b.textContent = opt.label || `Option ${idx + 1}`;
+            b.addEventListener("click", async () => {
+              // hide vote UI immediately
+              els.voteWrap.style.display = "none";
+              els.voteGrid.innerHTML = "";
+
+              // cast vote
+              const payload = {
+                showId: q.showId,
+                sessionId,
+                performer: pSelected,
+                optionLabel: opt.label,
+                optionIndex: idx,
+                tsClientIso: new Date().toISOString(),
+                userAgent: navigator.userAgent
+              };
+              await castVote(q.voteUrl, payload, debugLog);
+
+              // execute inline action
+              try {
+                await showAction(opt.action, audioCtx, debugLog, q);
+              } catch (e) {
+                debugLog(`Vote inline action failed: ${e.message}`);
+              }
+            });
+            els.voteGrid.appendChild(b);
+          });
+
+          // NOTE: repeats are ignored for VOTE (otherwise it would pop back up)
+          i++;
+          continue;
+        }
+
+        // normal visible actions
+        try {
+          await showAction(act, audioCtx, debugLog, q);
+        } catch (e) {
+          debugLog(`Action failed: ${e.message}`);
+        }
+
+        if (item.cue.repeatEvery && item.cue.repeatEvery > 0) startRepeat(act, item.cue.repeatEvery);
+
+        i++;
+      }
+
+      stopRepeat();
+      if (refreshHandle !== null) {
+        clearInterval(refreshHandle);
+        refreshHandle = null;
+        debugLog("Auto-refresh stopped.");
+      }
+      clearStage();
+      fitTextToBox("— end —");
+      debugLog("END.");
+    }, { once: true });
   }
 
   run();
