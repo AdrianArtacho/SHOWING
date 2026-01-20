@@ -774,6 +774,30 @@
       els.welcome.classList.add("hidden");
       els.stage.classList.remove("hidden");
 
+      // Debug-only rehearsal helper: jump to next scheduled cue without waiting.
+      // Enabled only when &debug=yes.
+      let scheduled = [];
+      let i = 0;
+      let debugWarpMs = 0;
+      const perfNow = () => performance.now() + (q.debug ? debugWarpMs : 0);
+
+      function requestSkipToNextCue(sourceLabel = 'skip') {
+        if (!q.debug) return;
+        if (!scheduled || i >= scheduled.length) {
+          debugLog(`${sourceLabel}: no next cue to skip to.`);
+          return;
+        }
+        // Don't skip while voting UI is visible.
+        if (els.voteWrap && els.voteWrap.style.display === 'block') return;
+
+        const target = scheduled[i].duePerfMs;
+        const delta = target - perfNow();
+        if (!Number.isFinite(delta)) return;
+        const bump = Math.max(0, delta + 50);
+        debugWarpMs += bump;
+        debugLog(`${sourceLabel}: time-warp +${Math.round(bump)}ms → next cue now.`);
+      }
+
       // Unlock audio
       let audioCtx = null;
       try {
@@ -792,6 +816,32 @@
 
       const startDate = new Date();
       const startPerf = performance.now();
+
+      // Hook debug controls (button + tap)
+      if (q.debug) {
+        const debugBar = document.getElementById('debugBar');
+        if (debugBar && !document.getElementById('dbgNextBtn')) {
+          const btn = document.createElement('button');
+          btn.id = 'dbgNextBtn';
+          btn.textContent = 'Next cue ▶︎';
+          btn.style.fontSize = '12px';
+          btn.style.padding = '8px 10px';
+          btn.style.borderRadius = '12px';
+          btn.style.border = '1px solid rgba(255,255,255,0.25)';
+          btn.style.background = 'rgba(17,17,17,0.9)';
+          btn.style.color = '#fff';
+          btn.style.marginLeft = '10px';
+          btn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            requestSkipToNextCue('button');
+          });
+          debugBar.insertBefore(btn, els.dbgRight);
+        }
+
+        // Tap/click anywhere on stage to jump to next cue (disabled while VOTE UI is open)
+        els.layer.addEventListener('pointerdown', () => requestSkipToNextCue('tap'));
+      }
       debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
 
       // "Timed" CSV refreshing (via ?refresh=10 etc.) should *not* touch relative cues (0:0:0+...).
@@ -883,7 +933,7 @@
       let lastIgnoreRelative = null;
 
       const rebuildSchedule = () => {
-        const nowPerf = performance.now();
+        const nowPerf = perfNow();
         const earliestFixedDuePerfMs = computeEarliestFixedDuePerfMs(cues, startDate, startPerf);
         const ignoreRelativeNow = (!q.overlap && earliestFixedDuePerfMs !== null && nowPerf >= earliestFixedDuePerfMs - 20);
 
@@ -906,17 +956,16 @@
       };
 
       const waitUntil = async (targetPerfMs) => {
-        while (performance.now() < targetPerfMs) {
+        while (perfNow() < targetPerfMs) {
           if (scheduleDirty) return false;
-          const remaining = targetPerfMs - performance.now();
+          const remaining = targetPerfMs - perfNow();
           await sleep(Math.min(200, Math.max(10, remaining)));
         }
         return true;
       };
 
-      let scheduled = rebuildSchedule();
+      scheduled = rebuildSchedule();
       debugLog(`Initial pending cues: ${scheduled.length}`);
-      let i = 0;
 
       while (true) {
         if (scheduleDirty) {
