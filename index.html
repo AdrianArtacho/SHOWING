@@ -774,36 +774,6 @@
       els.welcome.classList.add("hidden");
       els.stage.classList.remove("hidden");
 
-      // Debug-only: allow quickly jumping to the next cue (rehearsal accelerator)
-      if (q.debug) {
-        const debugBar = document.getElementById("debugBar");
-        if (debugBar && !document.getElementById("dbgNextBtn")) {
-          const btn = document.createElement("button");
-          btn.id = "dbgNextBtn";
-          btn.textContent = "Next cue ▶︎";
-          btn.style.fontSize = "12px";
-          btn.style.padding = "8px 10px";
-          btn.style.borderRadius = "12px";
-          btn.style.border = "1px solid rgba(255,255,255,0.25)";
-          btn.style.background = "rgba(17,17,17,0.9)";
-          btn.style.color = "#fff";
-          btn.style.marginLeft = "10px";
-          btn.addEventListener("click", (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            requestSkipToNextCue("button");
-          });
-          // Place between left and right labels
-          debugBar.insertBefore(btn, els.dbgRight);
-        }
-
-        // Tap/click anywhere on stage to jump to next cue (except when vote UI is open)
-        els.layer.addEventListener("pointerdown", (ev) => {
-          if (els.voteWrap && els.voteWrap.style.display === "block") return;
-          requestSkipToNextCue("tap");
-        });
-      }
-
       // Unlock audio
       let audioCtx = null;
       try {
@@ -822,30 +792,6 @@
 
       const startDate = new Date();
       const startPerf = performance.now();
-      // Debug time-warp (rehearsal helper): allow skipping to the next scheduled cue.
-      // Only active when &debug=yes.
-      let debugWarpMs = 0;
-      let debugSkipNow = false;
-      const nowPerf = () => performance.now() + (q.debug ? debugWarpMs : 0);
-
-      // These are assigned later; kept here so skip can access them via closure.
-      let scheduled = [];
-      i = 0;
-
-      function requestSkipToNextCue(sourceLabel = "skip") {
-        if (!q.debug) return;
-        if (!scheduled || i >= scheduled.length) {
-          debugLog(`${sourceLabel}: no next cue to skip to.`);
-          return;
-        }
-        const target = scheduled[i].duePerfMs;
-        const delta = target - nowPerf();
-        if (!Number.isFinite(delta)) return;
-        const bump = Math.max(0, delta + 50); // +50ms epsilon
-        debugWarpMs += bump;
-        debugSkipNow = true; // interrupt waitUntil promptly
-        debugLog(`${sourceLabel}: time-warp +${Math.round(bump)}ms → next cue now.`);
-      }
       debugLog(`START pressed. Start wall time: ${startDate.toLocaleTimeString()}`);
 
       // "Timed" CSV refreshing (via ?refresh=10 etc.) should *not* touch relative cues (0:0:0+...).
@@ -937,9 +883,9 @@
       let lastIgnoreRelative = null;
 
       const rebuildSchedule = () => {
-        const nowP = nowPerf();
+        const nowPerf = performance.now();
         const earliestFixedDuePerfMs = computeEarliestFixedDuePerfMs(cues, startDate, startPerf);
-        const ignoreRelativeNow = (!q.overlap && earliestFixedDuePerfMs !== null && nowP >= earliestFixedDuePerfMs - 20);
+        const ignoreRelativeNow = (!q.overlap && earliestFixedDuePerfMs !== null && nowPerf >= earliestFixedDuePerfMs - 20);
 
         if (ignoreRelativeNow !== lastIgnoreRelative) {
           debugLog(ignoreRelativeNow
@@ -954,22 +900,21 @@
           cue: c,
           duePerfMs: computeDuePerfMs(c.timeSpec, startDate, startPerf)
         }))
-        .filter(item => item.duePerfMs > nowP + 20 && !firedRaw.has(item.cue.raw))
+        .filter(item => item.duePerfMs > nowPerf + 20 && !firedRaw.has(item.cue.raw))
         .filter(item => !(ignoreRelativeNow && isRelativeTimeSpec(item.cue.timeSpec)))
         .sort((a, b) => a.duePerfMs - b.duePerfMs || a.idx - b.idx);
       };
 
       const waitUntil = async (targetPerfMs) => {
-        while (nowPerf() < targetPerfMs) {
+        while (performance.now() < targetPerfMs) {
           if (scheduleDirty) return false;
-          if (debugSkipNow) { debugSkipNow = false; return true; }
-          const remaining = targetPerfMs - nowPerf();
+          const remaining = targetPerfMs - performance.now();
           await sleep(Math.min(200, Math.max(10, remaining)));
         }
         return true;
       };
 
-      scheduled = rebuildSchedule();
+      let scheduled = rebuildSchedule();
       debugLog(`Initial pending cues: ${scheduled.length}`);
       let i = 0;
 
